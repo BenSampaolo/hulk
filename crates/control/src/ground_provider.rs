@@ -1,20 +1,24 @@
 use color_eyre::Result;
 use serde::{Deserialize, Serialize};
 
+use booster::ImuState;
 use context_attribute::context;
 use coordinate_systems::{Field, Ground, Robot};
-use framework::MainOutput;
+use framework::{MainOutput, PerceptionInput};
 use linear_algebra::{vector, Isometry3, Orientation3};
 use types::{robot_kinematics::RobotKinematics, support_foot::Side};
 
 #[derive(Deserialize, Serialize)]
-pub struct GroundProvider {}
+pub struct GroundProvider {
+    imu_state_cache: ImuState,
+}
 
 #[context]
 pub struct CreationContext {}
 
 #[context]
 pub struct CycleContext {
+    imu_state: PerceptionInput<ImuState, "Control", "imu_state">,
     robot_kinematics: Input<RobotKinematics, "robot_kinematics">,
     support_side: RequiredInput<Option<Side>, "support_foot.support_side?">,
     robot_orientation: RequiredInput<Option<Orientation3<Field>>, "robot_orientation?">,
@@ -29,14 +33,36 @@ pub struct MainOutputs {
 
 impl GroundProvider {
     pub fn new(_context: CreationContext) -> Result<Self> {
-        Ok(Self {})
+        Ok(Self {
+            imu_state_cache: ImuState::default(),
+        })
     }
 
     pub fn cycle(&mut self, context: CycleContext) -> Result<MainOutputs> {
         struct LeftSoleHorizontal;
         struct RightSoleHorizontal;
 
-        let (roll, pitch, _) = context.robot_orientation.inner.euler_angles();
+        let imu_state = &context
+            .imu_state
+            .persistent
+            .iter()
+            .chain(&context.imu_state.temporary)
+            .last();
+
+        let imu_state = match imu_state {
+            Some(state) => match state.1.last() {
+                Some(state) => {
+                    self.imu_state_cache = (*state).clone();
+                    state
+                }
+                None => &&self.imu_state_cache,
+            },
+            None => &&self.imu_state_cache,
+        };
+
+        let roll = imu_state.roll_pitch_yaw.x();
+        let pitch = imu_state.roll_pitch_yaw.y();
+
         let imu_orientation = Orientation3::from_euler_angles(roll, pitch, 0.0).mirror();
 
         let left_sole_horizontal_to_robot = Isometry3::from_parts(

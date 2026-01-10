@@ -290,5 +290,22 @@
     "goal_inner_width": 1.5,
     "goal_post_diameter": 0.1,
     "goal_depth": 0.5
+  },
+  "look_at": {
+    "glance_angle": 0.25,
+    "glance_direction_toggle_interval": {
+      "nanos": 0,
+      "secs": 1
+    },
+    "image_regions": {
+      "bottom": [
+        0.5,
+        0.7
+      ],
+      "center": [
+        0.5,
+        0.5
+      ]
+    }
   }
 }

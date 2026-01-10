@@ -1,6 +1,6 @@
 use coordinate_systems::Robot;
 use linear_algebra::Vector3;
-use path_serde::{PathDeserialize, PathIntrospect, PathSerialize};
+use path_serde::{deserialize, PathDeserialize, PathIntrospect, PathSerialize};
 use ros2::geometry_msgs::transform_stamped::TransformStamped;
 use serde::{Deserialize, Serialize};
 use types::{joints::Joints, parameters::MotorCommandParameters};
