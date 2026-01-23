@@ -2612,50 +2612,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "control"
-version = "0.1.0"
-dependencies = [
- "approx 0.5.1",
- "ball_filter",
- "bincode",
- "booster",
- "calibration",
- "color-eyre",
- "context_attribute",
- "coordinate_systems",
- "energy_optimization",
- "filtering",
- "framework",
- "geometry",
- "hardware",
- "hsl_network_messages",
- "hungarian_algorithm",
- "itertools 0.14.0",
- "kinematics",
- "linear_algebra",
- "log",
- "motionfile",
- "nalgebra",
- "ndarray 0.16.1",
- "ndarray-conv",
- "num-traits",
- "ordered-float 4.6.0",
- "ort",
- "path_serde",
- "projection",
- "proptest",
- "rand 0.9.2",
- "rand_chacha 0.9.0",
- "serde",
- "smallvec 1.15.1",
- "splines",
- "step_planning",
- "step_planning_solver",
- "types",
- "walking_inference",
-]
-
-[[package]]
 name = "convert_case"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4744,7 +4700,6 @@ dependencies = [
  "code_generation",
  "color-eyre",
  "communication",
- "control",
  "coordinate_systems",
  "ctrlc",
  "derive_more",
@@ -4763,6 +4718,7 @@ dependencies = [
  "libc",
  "linear_algebra",
  "log",
+ "motion",
  "object_detection",
  "parameters",
  "parking_lot",
@@ -4797,7 +4753,6 @@ dependencies = [
  "clap",
  "code_generation",
  "color-eyre",
- "control",
  "coordinate_systems",
  "energy_optimization",
  "framework",
@@ -4811,6 +4766,7 @@ dependencies = [
  "ittapi",
  "linear_algebra",
  "mcap",
+ "motion",
  "motionfile",
  "nalgebra",
  "ndarray 0.16.1",
@@ -4854,7 +4810,6 @@ dependencies = [
  "code_generation",
  "color-eyre",
  "communication",
- "control",
  "coordinate_systems",
  "ctrlc",
  "derive_more",
@@ -4875,6 +4830,7 @@ dependencies = [
  "libc",
  "linear_algebra",
  "log",
+ "motion",
  "motionfile",
  "nalgebra",
  "ndarray 0.16.1",
@@ -4914,7 +4870,6 @@ dependencies = [
  "code_generation",
  "color-eyre",
  "communication",
- "control",
  "coordinate_systems",
  "ctrlc",
  "derive_more",
@@ -4932,6 +4887,7 @@ dependencies = [
  "ittapi",
  "linear_algebra",
  "log",
+ "motion",
  "motionfile",
  "nalgebra",
  "ndarray 0.16.1",
@@ -5909,10 +5865,31 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ccccfee0ebe2798f7dac9beaa505dd9a627d3ce3919f25117c79f89de8880955"
 dependencies = [
  "ndarray 0.15.6",
- "ndarray-rand 0.14.0",
+ "ndarray-rand",
  "num",
  "rand 0.8.5",
  "rand_xorshift 0.3.0",
+]
+
+[[package]]
+name = "motion"
+version = "0.1.0"
+dependencies = [
+ "approx 0.5.1",
+ "booster",
+ "color-eyre",
+ "context_attribute",
+ "coordinate_systems",
+ "framework",
+ "hardware",
+ "kinematics",
+ "linear_algebra",
+ "log",
+ "path_serde",
+ "projection",
+ "serde",
+ "types",
+ "walking_inference",
 ]
 
 [[package]]
@@ -6103,22 +6080,7 @@ dependencies = [
  "portable-atomic",
  "portable-atomic-util",
  "rawpointer",
- "rayon",
  "serde",
-]
-
-[[package]]
-name = "ndarray-conv"
-version = "0.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61a04cd712622c289a7b523d3195e4fb5e2bf30c44de12355463fe58aa12213b"
-dependencies = [
- "ndarray 0.16.1",
- "ndarray-rand 0.15.0",
- "num",
- "realfft",
- "rustfft",
- "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -6128,17 +6090,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "65608f937acc725f5b164dcf40f4f0bc5d67dc268ab8a649d3002606718c4588"
 dependencies = [
  "ndarray 0.15.6",
- "rand 0.8.5",
- "rand_distr 0.4.3",
-]
-
-[[package]]
-name = "ndarray-rand"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f093b3db6fd194718dcdeea6bd8c829417deae904e3fcc7732dabcd4416d25d8"
-dependencies = [
- "ndarray 0.16.1",
  "rand 0.8.5",
  "rand_distr 0.4.3",
 ]
@@ -6719,7 +6670,6 @@ dependencies = [
  "calibration",
  "color-eyre",
  "context_attribute",
- "control",
  "coordinate_systems",
  "framework",
  "geometry",
@@ -6729,6 +6679,7 @@ dependencies = [
  "itertools 0.14.0",
  "linear_algebra",
  "log",
+ "motion",
  "nalgebra",
  "ndarray 0.16.1",
  "openvino",
@@ -8042,15 +7993,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "realfft"
-version = "3.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f821338fddb99d089116342c46e9f1fbf3828dba077674613e734e01d6ea8677"
-dependencies = [
- "rustfft",
-]
-
-[[package]]
 name = "rectangle-pack"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8703,7 +8645,6 @@ dependencies = [
  "calibration",
  "color-eyre",
  "context_attribute",
- "control",
  "coordinate_systems",
  "framework",
  "geometry",
