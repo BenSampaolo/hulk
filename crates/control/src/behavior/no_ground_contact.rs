@@ -1,5 +1,5 @@
 use types::{
-    motion_command::{HeadMotion, MotionCommand},
+    motion_command::{HeadMotion, ImageRegion, MotionCommand},
     world_state::WorldState,
 };
 
@@ -8,6 +8,8 @@ pub fn execute(world_state: &WorldState) -> Option<MotionCommand> {
         return None;
     }
     Some(MotionCommand::Stand {
-        head: HeadMotion::Center,
+        head: HeadMotion::Center {
+            image_region_target: ImageRegion::Center,
+        },
     })
 }

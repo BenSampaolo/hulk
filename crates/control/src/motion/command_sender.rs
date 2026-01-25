@@ -34,6 +34,10 @@ pub struct CycleContext {
     _prepare_motor_command_parameters: Parameter<MotorCommandParameters, "prepare_motor_command">,
 
     hardware_interface: HardwareInterface,
+    // look_at: Input<HeadJoints<f32>, "look_at">,
+    // motion_command: Input<MotionCommand, "selected_motion_command">,
+    // head_joints_command: Input<HeadJoints<f32>, "head_joints_command">,
+    combined_joint_positions: Input<Joints<f32>, "combined_joint_positions">,
 }
 
 #[context]
@@ -68,7 +72,7 @@ impl CommandSender {
             right_leg: context.target_joint_positions.right_leg,
         };
         let walk_low_command = LowCommand::new(
-            &target_joint_positions,
+            context.combined_joint_positions,
             context.walk_motor_command_parameters,
             CommandType::Serial,
         );

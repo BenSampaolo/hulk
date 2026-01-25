@@ -32,7 +32,9 @@ pub fn execute(
             image_region_target: ImageRegion::Bottom,
         }
     } else {
-        HeadMotion::Center
+        HeadMotion::Center {
+            image_region_target: ImageRegion::Center,
+        }
     };
 
     walk_and_stand.execute(

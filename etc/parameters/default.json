@@ -364,17 +364,6 @@
   "cycler_frequencies": {
     "world_state": 100
   },
-  "look_at": {
-    "glance_angle": 0.25,
-    "glance_direction_toggle_interval": {
-      "nanos": 0,
-      "secs": 1
-    },
-    "image_regions": {
-      "bottom": [0.5, 0.85],
-      "center": [0.5, 0.5]
-    }
-  },
   "image_receiver": {
     "image_rectified": "Rectified",
     "image_right_rectified": "RightRectified",
@@ -384,5 +373,42 @@
     "image_stereonet_visual": "StereonetVisual",
     "image_origin_left": "OriginLeft",
     "image_origin_right": "OriginRight"
+  },
+  "look_at": {
+    "glance_angle": 0.25,
+    "glance_direction_toggle_interval": {
+      "nanos": 0,
+      "secs": 1
+    },
+    "image_regions": {
+      "bottom": [
+        0.5,
+        0.85
+      ],
+      "center": [
+        0.5,
+        0.5
+      ],
+      "upper": [
+        0.5,
+        0.15
+      ]
+    }
+  },
+  "head_motion": {
+    "maximum_velocity": {
+      "yaw": 0.4,
+      "pitch": 0.4
+    },
+    "maximum_defender_velocity": {
+      "yaw": 2.0,
+      "pitch": 0.8
+    },
+    "outer_maximum_pitch": 0.5,
+    "inner_maximum_pitch": 0.4,
+    "outer_minimum_pitch": -0.5,
+    "inner_minimum_pitch": -0.4,
+    "outer_yaw": 0,
+    "injected_head_joints": null
   }
 }

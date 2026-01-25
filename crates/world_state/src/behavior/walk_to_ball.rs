@@ -63,7 +63,9 @@ impl WalkToBall {
                 }
             }
             None => MotionCommand::Stand {
-                head: HeadMotion::Center,
+                head: HeadMotion::Center {
+                    image_region_target: ImageRegion::Upper,
+                },
             },
         };
 

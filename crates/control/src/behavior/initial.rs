@@ -27,7 +27,9 @@ pub fn execute(
         && world_state.filtered_game_controller_state.is_none()
     {
         return Some(MotionCommand::Initial {
-            head: HeadMotion::Center,
+            head: HeadMotion::Center {
+                image_region_target: ImageRegion::Center,
+            },
         });
     }
 
@@ -66,7 +68,9 @@ pub fn execute(
                 target: expected_referee_position,
                 image_region_target: ImageRegion::Bottom,
             },
-            _ => HeadMotion::Center,
+            _ => HeadMotion::Center {
+                image_region_target: ImageRegion::Center,
+            },
         },
     })
 }
