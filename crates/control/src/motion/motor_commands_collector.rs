@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use types::{
     joints::{head::HeadJoints, Joints},
     motion_command::MotionCommand,
+    motion_selection::MotionType,
     // sensor_data::SensorData,
 };
 
@@ -152,6 +153,9 @@ impl MotorCommandCollector {
             //     ),
             //     Joints::from_head_and_body(head_joints_command.stiffnesses, walk.stiffnesses),
             // ),
+            MotionCommand::Stand { .. } => {
+                Joints::from_head_and_body(head_joints_command, walk.body())
+            }
             // MotionType::StandUpBack => {
             //     (*stand_up_back_positions, default_motion_stiffness(&context))
             // }
