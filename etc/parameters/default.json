@@ -404,5 +404,6 @@
     "inner_minimum_pitch": -0.4,
     "outer_yaw": 0,
     "injected_head_joints": null
-  }
+  },
+  "default_motion_stiffness_upper_body": 0.5
 }

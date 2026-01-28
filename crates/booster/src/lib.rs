@@ -246,6 +246,7 @@ pub struct LowCommand {
 impl LowCommand {
     pub fn new(
         joint_positions: &Joints,
+        joint_weights: &Joints,
         motor_command_parameters: &MotorCommandParameters,
         command_type: CommandType,
     ) -> Self {
@@ -255,13 +256,14 @@ impl LowCommand {
                 .into_iter()
                 .zip(motor_command_parameters.proportional_coefficients)
                 .zip(motor_command_parameters.derivative_coefficients)
-                .map(|((joint_position, kp), kd)| MotorCommand {
+                .zip(*joint_weights)
+                .map(|(((joint_position, kp), kd), weight)| MotorCommand {
                     position: joint_position,
                     velocity: 0.0,
                     torque: 0.0,
                     kp,
                     kd,
-                    weight: motor_command_parameters.weight,
+                    weight,
                 })
                 .collect(),
         }

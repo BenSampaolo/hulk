@@ -5869,6 +5869,7 @@ dependencies = [
  "color-eyre",
  "context_attribute",
  "coordinate_systems",
+ "energy_optimization",
  "filtering",
  "framework",
  "hardware",
