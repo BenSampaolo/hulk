@@ -7,6 +7,7 @@ use types::{
     joints::{head::HeadJoints, Joints},
     motion_command::MotionCommand,
     motion_selection::MotionType,
+    sensor_data::SensorData,
     // sensor_data::SensorData,
 };
 
@@ -29,7 +30,7 @@ pub struct CycleContext {
     // jump_left_joints_command: Input<MotorCommands<Joints<f32>>, "jump_left_joints_command">,
     // jump_right_joints_command: Input<MotorCommands<Joints<f32>>, "jump_right_joints_command">,
     motion_commmand: Input<MotionCommand, "selected_motion_command">,
-    // sensor_data: Input<SensorData, "sensor_data">,
+    sensor_data: Input<SensorData, "sensor_data">,
     // sit_down_joints_command: Input<MotorCommands<Joints<f32>>, "sit_down_joints_command">,
     // stand_up_back_positions: Input<Joints<f32>, "stand_up_back_positions">,
     // stand_up_front_positions: Input<Joints<f32>, "stand_up_front_positions">,
@@ -69,7 +70,7 @@ impl MotorCommandCollector {
     }
 
     pub fn cycle(&mut self, context: CycleContext) -> Result<MainOutputs> {
-        // let measured_positions = context.sensor_data.positions;
+        let measured_positions = context.sensor_data.positions;
         // let animation = context.animation_commands;
         // let dispatching_command = context.dispatching_command;
         // let fall_protection_positions = context.fall_protection_command.positions;
@@ -175,7 +176,10 @@ impl MotorCommandCollector {
             // MotionType::KeeperJumpRight => {
             //     (keeper_jump_right.positions, keeper_jump_right.stiffnesses)
             // }
+
             // MotionType::Unstiff => (measured_positions, Joints::fill(0.0)),
+            MotionCommand::Unstiff => measured_positions,
+
             MotionCommand::WalkWithVelocity { .. } => {
                 Joints::from_head_and_body(head_joints_command, walk.body())
             }
