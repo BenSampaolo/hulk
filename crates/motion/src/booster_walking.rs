@@ -8,6 +8,7 @@ use types::{
     cycle_time::CycleTime,
     joints::Joints,
     motion_command::MotionCommand,
+    motor_commands::MotorCommands,
     parameters::{MotorCommandParameters, RLWalkingParameters},
 };
 use walking_inference::{inference::WalkingInference, inputs::WalkingInferenceInputs};
@@ -41,7 +42,7 @@ pub struct CycleContext {
 #[context]
 #[derive(Default)]
 pub struct MainOutputs {
-    pub target_joint_positions: MainOutput<Joints>,
+    pub target_joint_positions: MainOutput<MotorCommands<Joints>>,
 }
 
 impl RLWalking {
@@ -86,7 +87,11 @@ impl RLWalking {
                 * (1.0 - context.walking_parameters.joint_position_smoothing_factor);
 
         Ok(MainOutputs {
-            target_joint_positions: self.smoothed_target_joint_positions.into(),
+            target_joint_positions: MotorCommands {
+                positions: self.smoothed_target_joint_positions,
+                stiffnesses: Joints::fill(1.0),
+            }
+            .into(),
         })
     }
 }

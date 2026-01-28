@@ -21,3 +21,6 @@ projection = { workspace = true }
 serde = { workspace = true }
 types = { workspace = true }
 walking_inference = { workspace = true }
+energy_optimization = { workspace = true }
+filtering = { workspace = true }
+proptest = { workspace = true }

@@ -4,11 +4,10 @@ use energy_optimization::current_minimizer::CurrentMinimizer;
 use framework::MainOutput;
 use serde::{Deserialize, Serialize};
 use types::{
-    joints::{head::HeadJoints, Joints},
+    joints::{arm::ArmJoints, body::BodyJoints, head::HeadJoints, leg::LegJoints, Joints},
     motion_command::MotionCommand,
-    motion_selection::MotionType,
-    sensor_data::SensorData,
-    // sensor_data::SensorData,
+    motor_commands::MotorCommands,
+    sensor_data::SensorData, // sensor_data::SensorData,
 };
 
 #[derive(Deserialize, Serialize)]
@@ -26,7 +25,7 @@ pub struct CycleContext {
     // arms_up_stand_joints_command: Input<MotorCommands<Joints<f32>>, "arms_up_stand_joints_command">,
     // dispatching_command: Input<MotorCommands<Joints<f32>>, "dispatching_command">,
     // fall_protection_command: Input<MotorCommands<Joints<f32>>, "fall_protection_command">,
-    head_joints_command: Input<HeadJoints<f32>, "head_joints_command">,
+    head_joints_command: Input<MotorCommands<HeadJoints<f32>>, "head_joints_command">,
     // jump_left_joints_command: Input<MotorCommands<Joints<f32>>, "jump_left_joints_command">,
     // jump_right_joints_command: Input<MotorCommands<Joints<f32>>, "jump_right_joints_command">,
     motion_commmand: Input<MotionCommand, "selected_motion_command">,
@@ -41,13 +40,13 @@ pub struct CycleContext {
     // keeper_jump_right_motor_commands:
     //     Input<MotorCommands<Joints<f32>>, "keeper_jump_right_motor_commands">,
     // center_jump_positions: Input<Joints<f32>, "center_jump_positions">,
-    walk_motor_commands: Input<Joints, "target_joint_positions">,
+    walk_motor_commands: Input<MotorCommands<Joints>, "target_joint_positions">,
     // cycle_time: Input<CycleTime, "cycle_time">,
     // penalized_pose: Parameter<Joints<f32>, "penalized_pose">,
     // initial_pose: Parameter<Joints<f32>, "initial_pose">,
     // current_minimizer_parameters:
     //     Parameter<CurrentMinimizerParameters, "current_minimizer_parameters">,
-    // default_motion_stiffness_upper_body: Parameter<f32, "default_motion_stiffness_upper_body">,
+    default_motion_stiffness_upper_body: Parameter<f32, "default_motion_stiffness_upper_body">,
     // only_one_foot_has_ground_contact: Input<bool, "only_one_foot_has_ground_contact">,
     // has_ground_contact: Input<bool, "has_ground_contact">,
     // primary_state: Input<PrimaryState, "world_state.robot.primary_state">,
@@ -59,7 +58,7 @@ pub struct CycleContext {
 #[context]
 #[derive(Default)]
 pub struct MainOutputs {
-    pub combined_joint_positions: MainOutput<Joints<f32>>,
+    pub combined_joint_positions: MainOutput<MotorCommands<Joints<f32>>>,
 }
 
 impl MotorCommandCollector {
@@ -91,7 +90,7 @@ impl MotorCommandCollector {
         // let keeper_jump_right = context.keeper_jump_right_motor_commands;
         let walk = *context.walk_motor_commands;
 
-        let positions = match motion_command {
+        let (positions, stiffnesses) = match motion_command {
             // MotionType::Animation => (animation.positions, animation.stiffnesses),
             // MotionType::AnimationStiff => (animation.positions, animation.stiffnesses),
             // MotionType::ArmsUpSquat => (arms_up_squat.positions, arms_up_squat.stiffnesses),
@@ -154,9 +153,13 @@ impl MotorCommandCollector {
             //     ),
             //     Joints::from_head_and_body(head_joints_command.stiffnesses, walk.stiffnesses),
             // ),
-            MotionCommand::Stand { .. } => {
-                Joints::from_head_and_body(head_joints_command, walk.body())
-            }
+            MotionCommand::Stand { .. } => (
+                Joints::from_head_and_body(head_joints_command.positions, walk.positions.body()),
+                Joints::from_head_and_body(
+                    head_joints_command.stiffnesses,
+                    walk.stiffnesses.body(),
+                ),
+            ),
             // MotionType::StandUpBack => {
             //     (*stand_up_back_positions, default_motion_stiffness(&context))
             // }
@@ -176,17 +179,28 @@ impl MotorCommandCollector {
             // MotionType::KeeperJumpRight => {
             //     (keeper_jump_right.positions, keeper_jump_right.stiffnesses)
             // }
+            MotionCommand::Unstiff => (measured_positions, Joints::fill(0.0)),
 
-            // MotionType::Unstiff => (measured_positions, Joints::fill(0.0)),
-            MotionCommand::Unstiff => measured_positions,
-
-            MotionCommand::WalkWithVelocity { .. } => {
-                Joints::from_head_and_body(head_joints_command, walk.body())
-            }
-            _ => Joints::from_head_and_body(head_joints_command, walk.body()),
+            MotionCommand::WalkWithVelocity { .. } => (
+                Joints::from_head_and_body(head_joints_command.positions, walk.positions.body()),
+                Joints::from_head_and_body(
+                    head_joints_command.stiffnesses,
+                    walk.stiffnesses.body(),
+                ),
+            ),
+            _ => (
+                Joints::from_head_and_body(head_joints_command.positions, walk.positions.body()),
+                Joints::from_head_and_body(
+                    head_joints_command.stiffnesses,
+                    walk.stiffnesses.body(),
+                ),
+            ),
         };
 
-        let combined_joint_positions = positions;
+        let combined_joint_positions = MotorCommands {
+            positions,
+            stiffnesses,
+        };
 
         // context
         //     .motor_position_difference
@@ -209,14 +223,14 @@ impl MotorCommandCollector {
     }
 }
 
-// fn default_motion_stiffness(context: &CycleContext<'_>) -> Joints {
-//     Joints::from_head_and_body(
-//         HeadJoints::fill(*context.default_motion_stiffness_upper_body),
-//         BodyJoints {
-//             left_arm: ArmJoints::fill(*context.default_motion_stiffness_upper_body),
-//             right_arm: ArmJoints::fill(*context.default_motion_stiffness_upper_body),
-//             left_leg: LegJoints::fill(1.0),
-//             right_leg: LegJoints::fill(1.0),
-//         },
-//     )
-// }
+fn default_motion_stiffness(context: &CycleContext<'_>) -> Joints {
+    Joints::from_head_and_body(
+        HeadJoints::fill(*context.default_motion_stiffness_upper_body),
+        BodyJoints {
+            left_arm: ArmJoints::fill(*context.default_motion_stiffness_upper_body),
+            right_arm: ArmJoints::fill(*context.default_motion_stiffness_upper_body),
+            left_leg: LegJoints::fill(1.0),
+            right_leg: LegJoints::fill(1.0),
+        },
+    )
+}

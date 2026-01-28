@@ -1,5 +1,6 @@
 use std::f32::consts::PI;
 
+use booster::{JointsMotorState, MotorState};
 use color_eyre::Result;
 use context_attribute::context;
 use filtering::low_pass_filter::LowPassFilter;
@@ -7,11 +8,10 @@ use framework::MainOutput;
 use serde::{Deserialize, Serialize};
 use types::{
     cycle_time::CycleTime,
-    joints::head::HeadJoints,
+    joints::{head::HeadJoints, Joints},
     motion_command::{HeadMotion as HeadMotionCommand, ImageRegion, MotionCommand},
     motor_commands::MotorCommands,
     parameters::HeadMotionParameters,
-    sensor_data::SensorData,
 };
 
 #[derive(Default, Deserialize, Serialize)]
@@ -29,7 +29,7 @@ pub struct CycleContext {
     // look_around: Input<HeadJoints<f32>, "look_around">,
     look_at: Input<HeadJoints<f32>, "look_at">,
     // motion_command: Input<MotionCommand, "motion_command">,
-    sensor_data: Input<SensorData, "sensor_data">,
+    serial_motor_states: Input<Joints<MotorState>, "serial_motor_states">,
     cycle_time: Input<CycleTime, "cycle_time">,
     // has_ground_contact: Input<bool, "has_ground_contact">,
     motion_command: Input<MotionCommand, "selected_motion_command">,
@@ -62,28 +62,7 @@ impl HeadMotion {
                 .into(),
             });
         }
-        // if context.motion_selection.dispatching_motion.is_some() {
-        //     return Ok(MainOutputs {
-        //         head_joints_command: MotorCommands {
-        //             positions: self.last_positions,
-        //             stiffnesses: HeadJoints::fill(0.8),
-        //         }
-        //         .into(),
-        //     });
-        // }
-
         let raw_positions = Self::joints_from_motion(&context);
-
-        // let maximum_movement = match context.role {
-        //     Role::DefenderLeft | Role::DefenderRight => {
-        //         context.parameters.maximum_defender_velocity
-        //             * context.cycle_time.last_cycle_duration.as_secs_f32()
-        //     }
-        //     _ => {
-        //         context.parameters.maximum_velocity
-        //             * context.cycle_time.last_cycle_duration.as_secs_f32()
-        //     }
-        // };
         let maximum_movement = context.parameters.maximum_velocity
             * context.cycle_time.last_cycle_duration.as_secs_f32();
 
@@ -114,6 +93,7 @@ impl HeadMotion {
     }
 
     pub fn joints_from_motion(context: &CycleContext) -> MotorCommands<HeadJoints<f32>> {
+        let head_positions = context.serial_motor_states.positions().head;
         let stiffnesses = HeadJoints::fill(0.8);
         let positions = match context.motion_command.head_motion() {
             Some(HeadMotionCommand::Center {
@@ -126,29 +106,14 @@ impl HeadMotion {
                 yaw: 0.0,
                 pitch: 0.4,
             },
-            // Some(HeadMotionCommand::LookAround | HeadMotionCommand::SearchForLostBall) => {
-            //     MotorCommands {
-            //         positions: *context.look_around,
-            //         stiffnesses,
-            //     }
-            // }
-
-            // Some(HeadMotionCommand::LookAt { .. })
-            // | Some(HeadMotionCommand::LookAtReferee { .. })
-            // | Some(HeadMotionCommand::LookLeftAndRightOf { .. }) => MotorCommands {
-            //     positions: *context.look_at,
-            //     stiffnesses,
-            // },
             Some(HeadMotionCommand::LookAt { .. }) => *context.look_at,
-
-            Some(HeadMotionCommand::Unstiff) => context.sensor_data.positions.head,
-            Some(HeadMotionCommand::Animation { stiff: false }) => {
-                context.sensor_data.positions.head
-            }
-            Some(HeadMotionCommand::Animation { stiff: true }) => {
-                context.sensor_data.positions.head
-            }
-            // Some(HeadMotionCommand::ZeroAngles) | None => Default::default(),
+            Some(HeadMotionCommand::Unstiff) => head_positions,
+            Some(HeadMotionCommand::Animation { stiff: false }) => head_positions,
+            Some(HeadMotionCommand::Animation { stiff: true }) => head_positions,
+            Some(HeadMotionCommand::ZeroAngles) => HeadJoints {
+                yaw: 0.0,
+                pitch: 0.0,
+            },
             Some(_) | None => Default::default(),
         };
         MotorCommands {

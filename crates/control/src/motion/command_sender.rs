@@ -26,7 +26,6 @@ pub struct CreationContext {
 pub struct CycleContext {
     low_command: AdditionalOutput<LowCommand, "low_command">,
 
-    target_joint_positions: Input<Joints, "target_joint_positions">,
     look_at: Input<HeadJoints<f32>, "look_at">,
     motion_command: Input<MotionCommand, "selected_motion_command">,
 
@@ -37,7 +36,7 @@ pub struct CycleContext {
     // look_at: Input<HeadJoints<f32>, "look_at">,
     // motion_command: Input<MotionCommand, "selected_motion_command">,
     // head_joints_command: Input<HeadJoints<f32>, "head_joints_command">,
-    combined_joint_positions: Input<Joints<f32>, "combined_joint_positions">,
+    combined_joint_positions: Input<MotorCommands<Joints<f32>>, "combined_joint_positions">,
 }
 
 #[context]
@@ -63,16 +62,9 @@ impl CommandSender {
             Some(HeadMotion::LookAt { .. }) => Some(*context.look_at),
             _ => None,
         };
-
-        let target_joint_positions = Joints {
-            head: look_at_head_joints.unwrap_or(context.target_joint_positions.head),
-            left_arm: context.target_joint_positions.left_arm,
-            right_arm: context.target_joint_positions.right_arm,
-            left_leg: context.target_joint_positions.left_leg,
-            right_leg: context.target_joint_positions.right_leg,
-        };
         let walk_low_command = LowCommand::new(
-            context.combined_joint_positions,
+            &context.combined_joint_positions.positions.,
+            &context.combined_joint_positions.stiffnesses,
             context.walk_motor_command_parameters,
             CommandType::Serial,
         );
