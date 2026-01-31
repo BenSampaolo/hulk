@@ -26,14 +26,11 @@ pub struct CreationContext {}
 #[context]
 pub struct CycleContext {
     parameters: Parameter<HeadMotionParameters, "head_motion">,
-    // look_around: Input<HeadJoints<f32>, "look_around">,
+    look_around: Input<HeadJoints<f32>, "look_around">,
     look_at: Input<HeadJoints<f32>, "look_at">,
-    // motion_command: Input<MotionCommand, "motion_command">,
     serial_motor_states: Input<Joints<MotorState>, "serial_motor_states">,
     cycle_time: Input<CycleTime, "cycle_time">,
-    // has_ground_contact: Input<bool, "has_ground_contact">,
     motion_command: Input<MotionCommand, "selected_motion_command">,
-    // role: Input<Role, "role">,
 }
 
 #[context]
@@ -106,6 +103,9 @@ impl HeadMotion {
                 yaw: 0.0,
                 pitch: 0.4,
             },
+            Some(HeadMotionCommand::LookAround | HeadMotionCommand::SearchForLostBall) => {
+                *context.look_around
+            }
             Some(HeadMotionCommand::LookAt { .. }) => *context.look_at,
             Some(HeadMotionCommand::Unstiff) => head_positions,
             Some(HeadMotionCommand::Animation { stiff: false }) => head_positions,

@@ -42,7 +42,7 @@ pub struct CycleContext {
 #[context]
 #[derive(Default)]
 pub struct MainOutputs {
-    pub target_joint_positions: MainOutput<MotorCommands<Joints>>,
+    pub target_joint_positions: MainOutput<Joints>,
 }
 
 impl RLWalking {
@@ -87,11 +87,7 @@ impl RLWalking {
                 * (1.0 - context.walking_parameters.joint_position_smoothing_factor);
 
         Ok(MainOutputs {
-            target_joint_positions: MotorCommands {
-                positions: self.smoothed_target_joint_positions,
-                stiffnesses: Joints::fill(1.0),
-            }
-            .into(),
+            target_joint_positions: self.smoothed_target_joint_positions.into(),
         })
     }
 }

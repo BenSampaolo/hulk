@@ -23,7 +23,7 @@ pub struct CycleContext {
     head_joints_command: Input<MotorCommands<HeadJoints<f32>>, "head_joints_command">,
     motion_commmand: Input<MotionCommand, "selected_motion_command">,
     serial_motor_states: Input<Joints<MotorState>, "serial_motor_states">,
-    walk_motor_commands: Input<MotorCommands<Joints>, "target_joint_positions">,
+    walk_body_joints: Input<Joints, "target_joint_positions">,
     default_motion_stiffness_upper_body: Parameter<f32, "default_motion_stiffness_upper_body">,
 }
 
@@ -44,29 +44,29 @@ impl MotorCommandCollector {
         let measured_positions = context.serial_motor_states.positions();
         let head_joints_command = *context.head_joints_command;
         let motion_command = context.motion_commmand;
-        let walk = *context.walk_motor_commands;
+        let walk = *context.walk_body_joints;
 
         let (positions, stiffnesses) = match motion_command {
             MotionCommand::Stand { .. } => (
-                Joints::from_head_and_body(head_joints_command.positions, walk.positions.body()),
+                Joints::from_head_and_body(head_joints_command.positions, walk.body()),
                 Joints::from_head_and_body(
                     head_joints_command.stiffnesses,
-                    walk.stiffnesses.body(),
+                    default_motion_stiffness(&context).body(),
                 ),
             ),
             MotionCommand::Unstiff => (measured_positions, Joints::fill(0.0)),
             MotionCommand::WalkWithVelocity { .. } => (
-                Joints::from_head_and_body(head_joints_command.positions, walk.positions.body()),
+                Joints::from_head_and_body(head_joints_command.positions, walk.body()),
                 Joints::from_head_and_body(
                     head_joints_command.stiffnesses,
-                    walk.stiffnesses.body(),
+                    default_motion_stiffness(&context).body(),
                 ),
             ),
             _ => (
-                Joints::from_head_and_body(head_joints_command.positions, walk.positions.body()),
+                Joints::from_head_and_body(head_joints_command.positions, walk.body()),
                 Joints::from_head_and_body(
                     head_joints_command.stiffnesses,
-                    walk.stiffnesses.body(),
+                    default_motion_stiffness(&context).body(),
                 ),
             ),
         };
