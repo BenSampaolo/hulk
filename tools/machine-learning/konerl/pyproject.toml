@@ -32,4 +32,5 @@ exclude = ["stubs/", "typings/"]
 line-length = 120
 
 [project.entry-points."mjlab.tasks"]
+k1_velocity = "konerl.tasks.k1_velocity_tracking"
 k1_standing = "konerl.tasks.k1_standing"
