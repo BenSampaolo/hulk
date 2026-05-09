@@ -10,9 +10,56 @@ from dataclasses import dataclass
 from mjlab.utils.noise.noise_cfg import NoiseCfg
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
+from .rewards import is_walking_env, is_kicking_env, is_standing_env, is_dribble_env
 
 _JOINT_VEL_EMA_ALPHA = 0.78
 
+
+def get_yaw_from_quaternion(quat: torch.Tensor) -> torch.Tensor:
+    # Extracts yaw (z-axis rotation) from a quaternion [w, x, y, z]
+    w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
+    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+    return yaw
+
+def quat_from_yaw(yaw: torch.Tensor) -> torch.Tensor:
+    # Creates a quaternion [w, x, y, z] from yaw (z-axis rotation)
+    half_yaw = yaw * 0.5
+    w = torch.cos(half_yaw)
+    z = torch.sin(half_yaw)
+    x = torch.zeros_like(yaw)
+    y = torch.zeros_like(yaw)
+    return torch.stack([w, x, y, z], dim=-1)
+
+def obs_gait_sin(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """The sine of the current gait phase. Scaled by 0 if not walking/kicking."""
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    command_cfg = env.command_manager.get_term(command_name)
+    assert command_cfg is not None
+    
+    gait_process = getattr(command_cfg, "gait_process")
+    vel_norms = torch.norm(command[:, :2], dim=-1)
+    active = (vel_norms >= 0.05).float()
+    return (torch.sin(2 * torch.pi * gait_process) * active).unsqueeze(-1)
+
+
+def obs_gait_cos(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+) -> torch.Tensor:
+    """The cosine of the current gait phase. Scaled by 0 if not walking/kicking."""
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    command_cfg = env.command_manager.get_term(command_name)
+    assert command_cfg is not None
+    
+    gait_process = getattr(command_cfg, "gait_process")
+    vel_norms = torch.norm(command[:, :2], dim=-1)
+    active = (vel_norms >= 0.05).float()
+    return (torch.cos(2 * torch.pi * gait_process) * active).unsqueeze(-1)
 
 def _get_env_step_index(env: Any) -> int | None:
     for attr in ("common_step_counter", "global_step_counter", "step_counter"):
@@ -130,23 +177,9 @@ class ClippedGaussianNoiseCfg(NoiseCfg):
     else:
       raise ValueError(f"Unsupported noise operation: {self.operation}")
 
-def get_yaw_from_quaternion(quat: torch.Tensor) -> torch.Tensor:
-    # Extracts yaw (z-axis rotation) from a quaternion [w, x, y, z]
-    w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
-    yaw = torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-    return yaw
-
-def quat_from_yaw(yaw: torch.Tensor) -> torch.Tensor:
-    # Creates a quaternion [w, x, y, z] from yaw (z-axis rotation)
-    half_yaw = yaw * 0.5
-    w = torch.cos(half_yaw)
-    z = torch.sin(half_yaw)
-    x = torch.zeros_like(yaw)
-    y = torch.zeros_like(yaw)
-    return torch.stack([w, x, y, z], dim=-1)
-
 def obs_ball_pos_heading_frame(
     env: ManagerBasedRlEnv,
+    outside_info: bool = False,
 ) -> torch.Tensor:
     """Ball position relative to trunk, ignoring trunk roll and pitch (yaw-only frame)."""
     robot = env.scene["robot"]
@@ -162,10 +195,13 @@ def obs_ball_pos_heading_frame(
     yaw_only_quat_w = quat_from_yaw(yaw)
     
     ball_pos_heading = quat_apply(quat_inv(yaw_only_quat_w), rel_pos_w)
+    if not outside_info:
+        ball_pos_heading = torch.where(ball_pos_heading[:, 1:2] < 0, torch.zeros_like(ball_pos_heading), ball_pos_heading)
     return ball_pos_heading
 
 def obs_ball_vel_heading_frame(
     env: ManagerBasedRlEnv,
+    outside_info: bool = False,
 ) -> torch.Tensor:
     """Ball linear velocity, ignoring trunk roll and pitch (yaw-only frame)."""
     robot = env.scene["robot"]
@@ -178,22 +214,9 @@ def obs_ball_vel_heading_frame(
     yaw_only_quat_w = quat_from_yaw(yaw)
     
     ball_vel_heading = quat_apply(quat_inv(yaw_only_quat_w), ball_vel_w)
+    if not outside_info:
+        ball_vel_heading = torch.where(ball_vel_heading[:, 1:2] < 0, torch.zeros_like(ball_vel_heading), ball_vel_heading)
     return ball_vel_heading
-
-def ball_position_relative_to_robot(env: ManagerBasedRlEnv) -> torch.Tensor:
-    """Compute the position of the ball relative to the robot's base frame."""
-    robot = env.scene["robot"]
-    ball = env.scene["ball"]
-    
-    robot_pos_w = robot.data.root_link_pos_w
-    ball_pos_w = ball.data.root_link_pos_w
-    
-    relative_pos_w = ball_pos_w - robot_pos_w
-    
-    robot_quat_w = robot.data.root_link_quat_w
-    relative_pos_b = quat_apply(quat_inv(robot_quat_w), relative_pos_w)
-    
-    return relative_pos_b
 
 ##
 # Randomization observations
@@ -360,25 +383,25 @@ def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
         "base_ang_vel": ObservationTermCfg(
             func=mdp.builtin_sensor,
             params={"sensor_name": "robot/imu_ang_vel"},
-            noise=ClippedGaussianNoiseCfg(mean=0, std=0.03, min=-0.1, max=0.1),
+            noise=ClippedGaussianNoiseCfg(mean=0, std=0.005, min=-0.03, max=0.03),
             delay_min_lag=1,
             delay_max_lag=2,
         ),
         "projected_gravity": ObservationTermCfg(
             func=mdp.projected_gravity,
-            noise=ClippedGaussianNoiseCfg(mean=0, std=0.03, min=-0.1, max=0.1),
+            noise=ClippedGaussianNoiseCfg(mean=0, std=0.04, min=-0.1, max=0.1),
             delay_min_lag=1,
             delay_max_lag=2,
         ),
         "joint_pos": ObservationTermCfg(
             func=mdp.joint_pos_rel,
-            noise=ClippedGaussianNoiseCfg(mean=0, std=0.03, min=-0.1, max=0.1),
+            noise=ClippedGaussianNoiseCfg(mean=0, std=0.003, min=-0.03, max=0.03),
             delay_min_lag=1,
             delay_max_lag=2,
         ),
         "joint_vel": ObservationTermCfg(
             func=JOINT_VEL_REL_SMOOTHED,
-            noise=ClippedGaussianNoiseCfg(mean=0, std=0.03, min=-0.1, max=0.1),
+            noise=ClippedGaussianNoiseCfg(mean=0, std=0.015, min=-0.05, max=0.05),
             delay_min_lag=1,
             delay_max_lag=2,
         ),
@@ -401,9 +424,14 @@ def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
             func=mdp.generated_commands,
             params={"command_name": "twist"},
         ),
-        # "gait": ObservationTermCfg(
-        #     func=obs_gait,
-        # ),
+        "gait_sin": ObservationTermCfg(
+            func=obs_gait_sin,
+            params={"command_name": "twist"},
+        ),
+        "gait_cos": ObservationTermCfg(
+            func=obs_gait_cos,
+            params={"command_name": "twist"},
+        ),
     }
 
     critic_terms = {
@@ -433,9 +461,14 @@ def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
             func=mdp.generated_commands,
             params={"command_name": "twist"},
         ),
-        # "gait": ObservationTermCfg(
-        #     func=obs_gait,
-        # ),
+        "gait_sin": ObservationTermCfg(
+            func=obs_gait_sin,
+            params={"command_name": "twist"},
+        ),
+        "gait_cos": ObservationTermCfg(
+            func=obs_gait_cos,
+            params={"command_name": "twist"},
+        ),
         # "gait_frequency": ObservationTermCfg(
         #     func=gait_frequency_multiplier,
         # ),

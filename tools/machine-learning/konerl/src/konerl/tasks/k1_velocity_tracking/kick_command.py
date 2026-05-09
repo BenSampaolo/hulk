@@ -19,6 +19,20 @@ if TYPE_CHECKING:
   from mjlab.viewer.debug_visualizer import DebugVisualizer
 
 
+def _calculate_yaw_only_rotation(trunk_quat_w: torch.Tensor) -> np.ndarray:
+    """Helper to compute yaw-only rotation matrix."""
+    yaw = torch.atan2(
+        2.0 * (trunk_quat_w[0] * trunk_quat_w[3] + trunk_quat_w[1] * trunk_quat_w[2]),
+        1.0 - 2.0 * (trunk_quat_w[2]**2 + trunk_quat_w[3]**2)
+    )
+    yaw_only_quat_w = torch.stack([
+        torch.cos(yaw / 2.0),
+        torch.zeros_like(yaw),
+        torch.zeros_like(yaw),
+        torch.sin(yaw / 2.0)
+    ], dim=-1)
+    return matrix_from_quat(yaw_only_quat_w).cpu().numpy()
+
 class KickCommand(CommandTerm):
     cfg: KickCommandCfg
 
@@ -52,6 +66,9 @@ class KickCommand(CommandTerm):
         self.is_kicking_env = torch.zeros_like(self.is_standing_env)
         self.is_dribble_env = torch.zeros_like(self.is_standing_env)
 
+        self.gait_frequency = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.gait_process = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+
         self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_kick_acc"] = torch.zeros(self.num_envs, device=self.device)
@@ -59,7 +76,14 @@ class KickCommand(CommandTerm):
         
         self._joystick_enabled: viser.GuiCheckboxHandle | None = None
         self._joystick_sliders: list[viser.GuiSliderHandle] = []
+        self._joystick_gait_freq_slider: viser.GuiSliderHandle | None = None
         self._joystick_get_env_idx: Callable[[], int] | None = None
+
+        self._show_ball_pos: viser.GuiCheckboxHandle | None = None
+        self._show_ball_vel: viser.GuiCheckboxHandle | None = None
+        self._show_robot_vel: viser.GuiCheckboxHandle | None = None
+        self._show_behavior_flags: viser.GuiCheckboxHandle | None = None
+        self._show_projected_gravity: viser.GuiCheckboxHandle | None = None
 
     """
     # Angular velocity 3x
@@ -115,6 +139,15 @@ class KickCommand(CommandTerm):
         self.is_standing_env[env_ids] = (rand_vals >= cumulative_fractions[1]) & (rand_vals < cumulative_fractions[2])
         self.is_walking_env[env_ids] = rand_vals >= cumulative_fractions[2] 
 
+        # Assign gait frequency based on env type. Walking gets frequency, standing gets 0.
+        # Dribbling and kicking might also want a gait frequency if they involve movement.
+        is_moving = self.is_walking_env[env_ids] | self.is_dribble_env[env_ids] | self.is_kicking_env[env_ids]
+        
+        self.gait_frequency[env_ids] = torch.where(
+            is_moving,
+            r.uniform_(*self.cfg.ranges.gait_frequency),
+            torch.zeros_like(self.gait_frequency[env_ids], device=self.device)
+        )
 
         self.vel_command_b[env_ids, 0] = torch.where(
             self.is_walking_env[env_ids],
@@ -241,10 +274,27 @@ class KickCommand(CommandTerm):
             def _(_ev) -> None:
                 for slider in sliders:
                     slider.value = 0.0
+
+            # Add Gait Frequency Slider
+            gait_freq_slider = server.gui.add_slider(
+                "gait_freq",
+                min=0.5,
+                max=5.0,
+                step=0.1,
+                initial_value=1.0,
+            )
         
         self._joystick_enabled = enabled
         self._joystick_sliders = sliders
+        self._joystick_gait_freq_slider = gait_freq_slider
         self._joystick_get_env_idx = get_env_idx
+        
+        with server.gui.add_folder("Debug Visualization"):
+            self._show_behavior_flags = server.gui.add_checkbox("Show Behavior Flags", initial_value=True)
+            self._show_projected_gravity = server.gui.add_checkbox("Show Projected Gravity", initial_value=False)
+            self._show_ball_pos = server.gui.add_checkbox("Show Ball Position Obs", initial_value=False)
+            self._show_ball_vel = server.gui.add_checkbox("Show Ball Velocity Obs", initial_value=False)
+            self._show_robot_vel = server.gui.add_checkbox("Show Robot Vel Commands", initial_value=True)
     
     def compute(self, dt: float) -> None:
         super().compute(dt)
@@ -254,6 +304,19 @@ class KickCommand(CommandTerm):
             for i, s in enumerate(self._joystick_sliders):
                 if i < self.vel_command_b.shape[1]:
                     self.vel_command_b[idx, i] = s.value
+            if self._joystick_gait_freq_slider is not None:
+                self.gait_frequency[idx] = self._joystick_gait_freq_slider.value
+
+        # Dynamically suppress gait frequency if velocity command is below threshold (0.05)
+        vel_norms = torch.norm(self.vel_command_b, dim=-1)
+        effective_gait_freq = torch.where(
+            vel_norms < 0.05,
+            torch.zeros_like(self.gait_frequency),
+            self.gait_frequency
+        )
+        
+        # Advance gait process
+        self.gait_process[:] = torch.fmod(self.gait_process + dt * effective_gait_freq, 1.0)
     
     def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
         # Visualize the velocity command as an arrow in the robot's local frame
@@ -289,41 +352,88 @@ class KickCommand(CommandTerm):
             ) -> np.ndarray:
                 return pos + mat @ vec
             
-            # Command linear velocity arrow (blue).
-            cmd_lin_from = local_to_world(np.array([0, 0, z_offset]) * scale)
-            cmd_lin_to = local_to_world(
-                (np.array([0, 0, z_offset]) + np.array([cmd[0], cmd[1], 0])) * scale
-            )
-            visualizer.add_arrow(
-                cmd_lin_from, cmd_lin_to, color=(0.2, 0.2, 0.6, 0.6), width=0.015
-            )
+            show_robot_vel = self._show_robot_vel is None or self._show_robot_vel.value
 
-            # Command angular velocity arrow (green).
-            cmd_ang_from = cmd_lin_from
-            cmd_ang_to = local_to_world(
-                (np.array([0, 0, z_offset]) + np.array([0, 0, cmd[2]])) * scale
-            )
-            visualizer.add_arrow(
-                cmd_ang_from, cmd_ang_to, color=(0.2, 0.6, 0.2, 0.6), width=0.015
-            )
+            if show_robot_vel:
+                # Command linear velocity arrow (blue).
+                cmd_lin_from = local_to_world(np.array([0, 0, z_offset]) * scale)
+                cmd_lin_to = local_to_world(
+                    (np.array([0, 0, z_offset]) + np.array([cmd[0], cmd[1], 0])) * scale
+                )
+                visualizer.add_arrow(
+                    cmd_lin_from, cmd_lin_to, color=(0.2, 0.2, 0.6, 0.6), width=0.015
+                )
 
-            # Actual linear velocity arrow (cyan).
-            act_lin_from = local_to_world(np.array([0, 0, z_offset]) * scale)
-            act_lin_to = local_to_world(
-                (np.array([0, 0, z_offset]) + np.array([lin_vel_b[0], lin_vel_b[1], 0])) * scale
-            )
-            visualizer.add_arrow(
-                act_lin_from, act_lin_to, color=(0.0, 0.6, 1.0, 0.7), width=0.015
-            )
+                # Command angular velocity arrow (green).
+                cmd_ang_from = cmd_lin_from
+                cmd_ang_to = local_to_world(
+                    (np.array([0, 0, z_offset]) + np.array([0, 0, cmd[2]])) * scale
+                )
+                visualizer.add_arrow(
+                    cmd_ang_from, cmd_ang_to, color=(0.2, 0.6, 0.2, 0.6), width=0.015
+                )
 
-            # Actual angular velocity arrow (light green).
-            act_ang_from = act_lin_from
-            act_ang_to = local_to_world(
-                (np.array([0, 0, z_offset]) + np.array([0, 0, ang_vel_b[2]])) * scale
-            )
-            visualizer.add_arrow(
-                act_ang_from, act_ang_to, color=(0.0, 1.0, 0.4, 0.7), width=0.015
-            )
+                # Actual linear velocity arrow (cyan).
+                act_lin_from = local_to_world(np.array([0, 0, z_offset]) * scale)
+                act_lin_to = local_to_world(
+                    (np.array([0, 0, z_offset]) + np.array([lin_vel_b[0], lin_vel_b[1], 0])) * scale
+                )
+                visualizer.add_arrow(
+                    act_lin_from, act_lin_to, color=(0.0, 0.6, 1.0, 0.7), width=0.015
+                )
+
+                # Actual angular velocity arrow (light green).
+                act_ang_from = act_lin_from
+                act_ang_to = local_to_world(
+                    (np.array([0, 0, z_offset]) + np.array([ang_vel_b[0], ang_vel_b[1], ang_vel_b[2]])) * scale * 0.5
+                )
+                visualizer.add_arrow(
+                    act_ang_from, act_ang_to, color=(0.0, 1.0, 0.4, 0.7), width=0.015
+                )
+
+            # Projected Gravity visualization (purple downward vector)
+            show_proj_grav = self._show_projected_gravity is None or self._show_projected_gravity.value
+            if show_proj_grav:
+                grav_from = local_to_world(np.array([0, 0, z_offset]) * scale)
+                grav_to = local_to_world(np.array([0, 0, z_offset]) * scale) - np.array([0, 0, 1.0]) * scale
+                visualizer.add_arrow(
+                    grav_from, grav_to, color=(0.8, 0.0, 0.8, 0.7), width=0.015
+                )
+
+            # Behavior Flags dots (Above robot's head)
+            show_flags = self._show_behavior_flags is None or self._show_behavior_flags.value
+            if show_flags:
+                is_dribble = bool(self.is_dribble_env[batch].item())
+                is_kicking = bool(self.is_kicking_env[batch].item())
+                is_standing = bool(self.is_standing_env[batch].item())
+                is_walking = bool(self.is_walking_env[batch].item())
+
+                flag_height = 0.5 + z_offset # above head
+                spacing = 0.1
+                
+                # 1. Kicking (Red)
+                kick_color = (1.0, 0.0, 0.0, 1.0) if is_kicking else (0.1, 0.0, 0.0, 0.2)
+                visualizer.add_sphere(
+                    local_to_world(np.array([-0.5 * spacing, -0.5 * spacing, flag_height])), radius=0.03, color=kick_color
+                )
+                
+                # 2. Walking (Green)
+                walk_color = (0.0, 1.0, 0.0, 1.0) if is_walking else (0.0, 0.1, 0.0, 0.2)
+                visualizer.add_sphere(
+                    local_to_world(np.array([-0.5 * spacing, 0.5 * spacing, flag_height])), radius=0.03, color=walk_color
+                )
+
+                # 3. Dribbling (Blue)
+                dribble_color = (0.0, 0.0, 1.0, 1.0) if is_dribble else (0.0, 0.0, 0.1, 0.2)
+                visualizer.add_sphere(
+                    local_to_world(np.array([0.5 * spacing, -0.5 * spacing, flag_height])), radius=0.03, color=dribble_color
+                )
+
+                # 4. Standing (White)
+                stand_color = (1.0, 1.0, 1.0, 1.0) if is_standing else (0.1, 0.1, 0.1, 0.2)
+                visualizer.add_sphere(
+                    local_to_world(np.array([0.5 * spacing, 0.5 * spacing, flag_height])), radius=0.03, color=stand_color
+                )
 
             # Kick direction arrow (red)
             kick_cmd_from = self.ball.data.root_link_pos_w[batch].cpu().numpy()
@@ -331,6 +441,46 @@ class KickCommand(CommandTerm):
             visualizer.add_arrow(
                 kick_cmd_from, kick_cmd_to, color=(0.8, 0.2, 0.2, 0.7), width=0.015
             )
+
+            if self._show_ball_pos is not None and self._show_ball_pos.value:
+                from konerl.tasks.k1_velocity_tracking.observations import obs_ball_pos_heading_frame
+                
+                # Fetch observation logic from observations.py
+                ball_pos_obs = obs_ball_pos_heading_frame(self._env, outside_info=True)
+                
+                trunk_pos_w = self.robot.data.root_link_pos_w[batch].cpu().numpy()
+                trunk_quat_w = self.robot.data.root_link_quat_w[batch]
+                
+                rot_mat = _calculate_yaw_only_rotation(trunk_quat_w)
+                
+                obs_local = ball_pos_obs[batch].cpu().numpy()
+                
+                # Re-project to world frame
+                obs_world_rel = rot_mat @ obs_local
+                
+                visualizer.add_arrow(
+                    trunk_pos_w, trunk_pos_w + obs_world_rel, color=(1.0, 1.0, 0.0, 0.7), width=0.012
+                )
+            
+            if self._show_ball_vel is not None and self._show_ball_vel.value:
+                from konerl.tasks.k1_velocity_tracking.observations import obs_ball_vel_heading_frame
+                
+                # Fetch observation logic from observations.py
+                ball_vel_obs = obs_ball_vel_heading_frame(self._env, outside_info=True)
+                
+                ball_pos_w = self.ball.data.root_link_pos_w[batch].cpu().numpy()
+                trunk_quat_w = self.robot.data.root_link_quat_w[batch]
+
+                rot_mat = _calculate_yaw_only_rotation(trunk_quat_w)
+                
+                obs_local = ball_vel_obs[batch].cpu().numpy()
+
+                # Re-project to world frame
+                obs_world_vel = rot_mat @ obs_local
+
+                visualizer.add_arrow(
+                    ball_pos_w, ball_pos_w + obs_world_vel * scale, color=(1.0, 0.5, 0.0, 0.7), width=0.012
+                )
 
 
 @dataclass(kw_only=True)
@@ -354,6 +504,7 @@ class KickCommandCfg(CommandTermCfg):
         dribble_ang_vel_z: tuple[float, float] = (-1.5, 1.5)
 
         kick_vel: tuple[float, float] = (0.1, 5.0)
+        gait_frequency: tuple[float, float] = (1.0, 2.0)  # steps per second
     
     ranges: Ranges
 

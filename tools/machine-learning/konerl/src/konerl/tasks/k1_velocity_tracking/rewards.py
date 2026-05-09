@@ -11,8 +11,21 @@ from mjlab.sensor import BuiltinSensor, ContactSensor
 from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 
 from mjlab.tasks.velocity import mdp
+from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
-from .observations import get_yaw_from_quaternion, quat_from_yaw, quat_apply, quat_inv
+def get_yaw_from_quaternion(quat: torch.Tensor) -> torch.Tensor:
+    """Extract yaw from a quaternion [w, x, y, z]."""
+    w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+def quat_from_yaw(yaw: torch.Tensor) -> torch.Tensor:
+    """Create a yaw-only quaternion [w, x, y, z] from a yaw angle."""
+    half_yaw = yaw / 2.0
+    w = torch.cos(half_yaw)
+    z = torch.sin(half_yaw)
+    x = torch.zeros_like(yaw)
+    y = torch.zeros_like(yaw)
+    return torch.stack([w, x, y, z], dim=-1)
 
 class BoundedPenaltyWrapper:
     """Wraps both stateless functions and stateful classes to bound their penalties."""
@@ -439,6 +452,8 @@ def feet_air_time(
     """Reward feet air time."""
     sensor: ContactSensor = env.scene[sensor_name]
     sensor_data = sensor.data
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
     current_air_time = sensor_data.current_air_time
     assert current_air_time is not None
     in_range = (current_air_time > threshold_min) & (current_air_time < threshold_max)
@@ -450,7 +465,9 @@ def feet_air_time(
     )
     env.extras["log"]["Metrics/air_time_mean"] = mean_air_time
 
-    active = is_standing_env(env, command_name) < 0.5
+    command_active = (command[:, :2] ** 2).sum(dim=-1).sqrt() > command_threshold
+
+    active = is_standing_env(env, command_name) < 0.5 * command_active.float()
 
     return reward * active
 
@@ -530,6 +547,34 @@ def soft_landing(
       cost = cost * active
   return cost
 
+def feet_swing(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    swing_period: float = 0.5,
+    sensor_name: str = "feet_ground_contact",
+) -> torch.Tensor:
+    """Rewards lifting the foot when the gait phase indicates it should be swinging."""
+    command = env.command_manager.get_command(command_name)
+    command_cfg = env.command_manager.get_term(command_name)
+    assert command is not None
+    assert command_cfg is not None
+
+    gait_process = getattr(command_cfg, "gait_process")
+    gait_frequency = getattr(command_cfg, "gait_frequency")
+
+    contact_sensor = env.scene.sensors[sensor_name]
+    assert contact_sensor is not None
+    feet_contact = contact_sensor.data.found < 0.5
+    
+    vel_norms = torch.norm(command[:, :2], dim=-1)
+    is_active = (vel_norms >= 0.05) & (gait_frequency > 1.0e-8)
+
+    # Copied from Booster_Gym's foot swing reward
+    left_swing = (torch.abs(gait_process - 0.25) < 0.5 * swing_period) & is_active
+    right_swing = (torch.abs(gait_process - 0.75) < 0.5 * swing_period) & is_active
+    reward = (left_swing & ~feet_contact[:, 0]).float() + (right_swing & ~feet_contact[:, 1]).float()
+    return reward
+
 def make_reward_cfg() -> dict[str, RewardTermCfg]:
     return {
         "survival": RewardTermCfg(
@@ -550,7 +595,7 @@ def make_reward_cfg() -> dict[str, RewardTermCfg]:
         ),
         "target_base_height": RewardTermCfg(
             func=TargetBaseHeightMean,
-            weight=0.3,
+            weight=0.6,
             params={
                 "target_height": 0.5,
                 "ema_alpha": 0.1,
@@ -560,7 +605,7 @@ def make_reward_cfg() -> dict[str, RewardTermCfg]:
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
         "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.15),
         "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-0.15),
-        "action_jerk_l2": RewardTermCfg(func=ActionJerkL2, weight=-0.15),
+        "action_jerk_l2": RewardTermCfg(func=ActionJerkL2, weight=-0.05),
         "joint_vel_l2": RewardTermCfg(func=mdp.joint_vel_l2, weight=-0.002),
         "torque_l2": RewardTermCfg(func=mdp.joint_torques_l2, weight=-0.0003),
         "body_ang_vel": RewardTermCfg(
@@ -669,6 +714,15 @@ def make_reward_cfg() -> dict[str, RewardTermCfg]:
                 "command_name": "twist",
                 "robot_cfg": SceneEntityCfg("robot"),
                 "ball_cfg": SceneEntityCfg("ball"),
+            }
+        ),
+        "feet_swing": RewardTermCfg(
+            func=feet_swing,
+            weight=1.0,
+            params={
+                "command_name": "twist",
+                "swing_period": 0.5,
+                "sensor_name": "feet_ground_contact",
             }
         ),
     }

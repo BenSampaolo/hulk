@@ -64,6 +64,8 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"]) -> SceneCfg:
         )
     else:
         raise ValueError(f"unknown terrain: {terrain_type}")
+    
+    ball_observation_marker = ()
 
     feet_ground_cfg = ContactSensorCfg(
         name="feet_ground_contact",
