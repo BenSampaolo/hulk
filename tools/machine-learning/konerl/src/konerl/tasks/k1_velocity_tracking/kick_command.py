@@ -309,10 +309,17 @@ class KickCommand(CommandTerm):
 
         # Dynamically suppress gait frequency if velocity command is below threshold (0.05)
         vel_norms = torch.norm(self.vel_command_b, dim=-1)
+        
+        # Add the offset from the GaitFrequencyAction if it exists
+        action_offset = torch.zeros_like(self.gait_frequency)
+        if "gait_frequency" in self._env.action_manager.active_terms:
+            gait_action = self._env.action_manager.get_term("gait_frequency")
+            action_offset = getattr(gait_action, "freq_offset").squeeze(-1)
+
         effective_gait_freq = torch.where(
             vel_norms < 0.05,
             torch.zeros_like(self.gait_frequency),
-            self.gait_frequency
+            self.gait_frequency + action_offset
         )
         
         # Advance gait process

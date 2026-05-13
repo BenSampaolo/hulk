@@ -21,12 +21,10 @@ DEFAULT_MOTION_RANGES = SmoothedVelocityCommandCfg.SmoothRanges(
 REL_STANDING_ENVS = 0.3
 
 class GaitFrequencyAction(ActionTerm):
-    """Controls the operating frequency of the gait clock.
+    """Controls an additive offset to the commanded gait frequency.
 
-    Instead of shifting a global clock (which requires infinite integration to track),
-    this action outputs a frequency multiplier for the current timestep.
-    Base frequency is 1 / gait_period.
-    Multiplier range: [1.0, 3.0] (can step up to 3x faster to catch a fall).
+    The policy outputs an action in [-1, 1], which is scaled by `offset_scale`
+    and added directly to the environment's nominal gait frequency.
     """
 
     def __init__(self, cfg: "GaitFrequencyActionCfg", env):
@@ -34,17 +32,8 @@ class GaitFrequencyAction(ActionTerm):
         self.cfg = cfg
         self._action_dim = 1
         
-        # Raw action from policy [-1, 1] mapped to multiplier
         self._raw_action = torch.zeros((self.num_envs, 1), device=self.device)
-        
-        # The integrated phase accumulator in [0, 2pi)
-        self._current_phase = torch.zeros((self.num_envs, 1), device=self.device)
-        
-        # The calculated frequency multiplier for this step
-        self._freq_multiplier = torch.ones((self.num_envs, 1), device=self.device)
-        
-        self.base_freq = 1.0 / cfg.gait_period_s
-        self.step_dt = getattr(env, "step_dt", 0.02) # Fallback to 50Hz
+        self._freq_offset = torch.zeros((self.num_envs, 1), device=self.device)
 
     @property
     def action_dim(self) -> int:
@@ -55,42 +44,29 @@ class GaitFrequencyAction(ActionTerm):
         return self._raw_action
 
     @property
-    def current_phase(self) -> torch.Tensor:
-        """The absolute phase of the gait cycle [0, 2pi)."""
-        return self._current_phase
-        
-    @property
-    def freq_multiplier(self) -> torch.Tensor:
-        """The commanded frequency multiplier [1.0, 3.0]."""
-        return self._freq_multiplier
+    def freq_offset(self) -> torch.Tensor:
+        """The calculated frequency offset [Hz]."""
+        return self._freq_offset
 
     def process_actions(self, actions: torch.Tensor) -> None:
         self._raw_action[:] = actions
         
-        # Map policy output [-1, 1] -> [1.0, 3.0]
-        # We clamp it just in case the policy outputs out of bounds
+        # Clamped action [-1, 1] scaled by offset_scale
         clamped = torch.clamp(actions, min=-1.0, max=1.0)
-        self._freq_multiplier[:] = 1.0 + (clamped + 1.0) # -1 -> 1.0, 1 -> 3.0
-        
-        # Integrate phase
-        phase_delta = (2.0 * math.pi * self.base_freq * self._freq_multiplier) * self.step_dt
-        self._current_phase[:] = (self._current_phase + phase_delta) % (2.0 * math.pi)
+        self._freq_offset[:] = clamped * self.cfg.offset_scale
 
     def apply_actions(self) -> None:
-        # This action only modifies internal state used by observations/rewards
         pass
 
     def reset(self, env_ids: torch.Tensor | slice | None = None) -> None:
         if env_ids is None:
             env_ids = slice(None)
         self._raw_action[env_ids] = 0.0
-        self._current_phase[env_ids] = 0.0
-        self._freq_multiplier[env_ids] = 1.0
-
+        self._freq_offset[env_ids] = 0.0
 
 @dataclass(kw_only=True)
 class GaitFrequencyActionCfg(ActionTermCfg):
-    gait_period_s: float = 0.8 # Base period in seconds
+    offset_scale: float = 1.5 # The maximum Hz offset when action is 1.0 or -1.0
 
     def build(self, env) -> ActionTerm:
         return GaitFrequencyAction(cfg=self, env=env)
@@ -104,10 +80,10 @@ def make_actions_cfg() -> dict[str, ActionTermCfg]:
             scale=0.5,  # Override per-robot.
             use_default_offset=True,
         ),
-        # "gait_frequency": GaitFrequencyActionCfg(
-        #     entity_name="robot",
-        #     gait_period_s=0.8,
-        # ),
+        "gait_frequency": GaitFrequencyActionCfg(
+            entity_name="robot",
+            offset_scale=0.8,
+        ),
     }
 
 

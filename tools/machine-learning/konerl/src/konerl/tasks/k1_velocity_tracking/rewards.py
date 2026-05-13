@@ -575,6 +575,18 @@ def feet_swing(
     reward = (left_swing & ~feet_contact[:, 0]).float() + (right_swing & ~feet_contact[:, 1]).float()
     return reward
 
+def action_gait_freq_penalty(
+    env: ManagerBasedRlEnv,
+) -> torch.Tensor:
+    """Penalizes the agent for using the gait frequency offset action."""
+    if "gait_frequency" not in env.action_manager.active_terms:
+        return torch.zeros(env.num_envs, device=env.device)
+        
+    gait_action = env.action_manager.get_term("gait_frequency")
+    freq_offset = getattr(gait_action, "freq_offset").squeeze(-1)
+    
+    return torch.square(freq_offset)
+
 def make_reward_cfg() -> dict[str, RewardTermCfg]:
     return {
         "survival": RewardTermCfg(
@@ -614,33 +626,6 @@ def make_reward_cfg() -> dict[str, RewardTermCfg]:
             params={
                 "asset_cfg": SceneEntityCfg("robot", body_names="Trunk")
             },  
-        ),
-        "angular_momentum": RewardTermCfg(
-            func=mdp.angular_momentum_penalty,
-            weight=-0.3,
-            params={"sensor_name": "robot/root_angmom"},
-        ),
-        "air_time": RewardTermCfg(
-            func=feet_air_time,
-            weight=0.6,
-            params={
-                "sensor_name": "feet_ground_contact",
-                "threshold_min": 0.15,
-                "threshold_max": 0.5,
-                "command_name": "twist",
-                "command_threshold": 0.5,
-            },
-        ),
-        "foot_swing_height": RewardTermCfg(
-            func=feet_swing_height,
-            weight=-0.6,
-            params={
-                "sensor_name": "feet_ground_contact",
-                "height_sensor_name": "foot_height_scan",
-                "target_height": 0.08,
-                "command_name": "twist",
-                "command_threshold": 0.05,
-            },
         ),
         "soft_landing": RewardTermCfg(
             func=soft_landing,
@@ -724,5 +709,9 @@ def make_reward_cfg() -> dict[str, RewardTermCfg]:
                 "swing_period": 0.5,
                 "sensor_name": "feet_ground_contact",
             }
+        ),
+        "gait_freq_penalty": RewardTermCfg(
+            func=action_gait_freq_penalty,
+            weight=-0.5,
         ),
     }
