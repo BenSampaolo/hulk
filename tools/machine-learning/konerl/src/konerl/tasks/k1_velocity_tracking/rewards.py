@@ -587,6 +587,40 @@ def action_gait_freq_penalty(
     
     return torch.square(freq_offset)
 
+def torque_tiredness(
+        env: ManagerBasedRlEnv, 
+        asset_cfg: SceneEntityCfg
+    ) -> torch.Tensor:
+        robot = env.scene[asset_cfg.name]
+        assert robot is not None
+
+        limits = torch.tensor([
+            6.0,  # AAHead_Pitch
+            6.0,  # Head_Yaw
+            14.0, # ALeft_Shoulder_Pitch
+            14.0, # Left_Shoulder_Roll
+            14.0, # Left_Elbow_Pitch
+            14.0, # Left_Elbow_Yaw
+            14.0, # ARight_Shoulder_Pitch
+            14.0, # Right_Shoulder_Roll
+            14.0, # Right_Elbow_Pitch
+            14.0, # Right_Elbow_Yaw
+            30.0, # Left_Hip_Pitch
+            35.0, # Left_Hip_Roll
+            20.0, # Left_Hip_Yaw
+            40.0, # Left_Knee_Pitch
+            20.0, # Left_Ankle_Pitch
+            20.0, # Left_Ankle_Roll
+            30.0, # Right_Hip_Pitch
+            35.0, # Right_Hip_Roll
+            20.0, # Right_Hip_Yaw
+            40.0, # Right_Knee_Pitch
+            20.0, # Right_Ankle_Pitch
+            20.0, # Right_Ankle_Roll
+        ], device=env.device)
+
+        return torch.sum(torch.square(robot.data.qfrc_actuator / limits).clip(max=1.0), dim=-1)
+
 def make_reward_cfg() -> dict[str, RewardTermCfg]:
     return {
         "survival": RewardTermCfg(
@@ -618,8 +652,40 @@ def make_reward_cfg() -> dict[str, RewardTermCfg]:
         "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.15),
         "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-0.15),
         "action_jerk_l2": RewardTermCfg(func=ActionJerkL2, weight=-0.05),
-        "joint_vel_l2": RewardTermCfg(func=mdp.joint_vel_l2, weight=-0.002),
-        "torque_l2": RewardTermCfg(func=mdp.joint_torques_l2, weight=-0.0003),
+        # "joint_vel_l2": RewardTermCfg(func=mdp.joint_vel_l2, weight=-0.002),
+        "torque_l2": RewardTermCfg(func=mdp.joint_torques_l2, weight=-0.0005),
+        "electrical_power_cost": RewardTermCfg(
+            func=mdp.electrical_power_cost,
+            weight=-0.002,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=('ALeft_Shoulder_Pitch', 'Left_Shoulder_Roll', 'Left_Elbow_Pitch', 'Left_Elbow_Yaw', 'ARight_Shoulder_Pitch', 'Right_Shoulder_Roll', 'Right_Elbow_Pitch', 'Right_Elbow_Yaw', 'Left_Hip_Pitch', 'Left_Hip_Roll', 'Left_Hip_Yaw', 'Left_Knee_Pitch', 'Left_Ankle_Pitch', 'Left_Ankle_Roll', 'Right_Hip_Pitch', 'Right_Hip_Roll', 'Right_Hip_Yaw', 'Right_Knee_Pitch', 'Right_Ankle_Pitch', 'Right_Ankle_Roll')),
+            },
+        ),
+        "joint_tiredness": RewardTermCfg(
+            func=torque_tiredness,
+            weight=-0.1,
+            params={
+                "asset_cfg": SceneEntityCfg("robot"),
+            },
+        ),    
+        "arm_position": RewardTermCfg(
+            func=mdp.variable_posture,
+            weight=-0.1,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=('ALeft_Shoulder_Pitch', 'Left_Shoulder_Roll', 'Left_Elbow_Pitch', 'Left_Elbow_Yaw', 'ARight_Shoulder_Pitch', 'Right_Shoulder_Roll', 'Right_Elbow_Pitch', 'Right_Elbow_Yaw', 'Left_Hip_Pitch', 'Left_Hip_Roll', 'Left_Hip_Yaw', 'Left_Knee_Pitch', 'Left_Ankle_Pitch', 'Left_Ankle_Roll', 'Right_Hip_Pitch', 'Right_Hip_Roll', 'Right_Hip_Yaw', 'Right_Knee_Pitch', 'Right_Ankle_Pitch', 'Right_Ankle_Roll')),
+                "command_name": "twist",
+                "std_standing": {".*": 0.2},
+                "std_walking": {".*": 0.2},
+                "std_running": {".*": 0.2},
+            },
+        ),                                             
+        "angular_momentum_penalty": RewardTermCfg(
+            func=mdp.angular_momentum_penalty,
+            weight=-0.005,
+            params={
+                "sensor_name": "robot/root_angmom",
+            },
+        ),
         "body_ang_vel": RewardTermCfg(
             func=mdp.body_angular_velocity_penalty,
             weight=-0.001,
@@ -654,53 +720,53 @@ def make_reward_cfg() -> dict[str, RewardTermCfg]:
                 "ema_alpha": 0.2,
             },
         ),
-        "kick_contact": RewardTermCfg(
-            func=kick_contact_reward,
-            weight=50.0,
-            params={
-                "command_name": "twist",
-                "sensor_name": "robot_ball_collision",
-            }
-        ),
-        "kick_velocity": RewardTermCfg(
-            func=KickVelocityReward,
-            weight=50.0,
-            params={
-                "command_name": "twist",
-                "ball_cfg": SceneEntityCfg("ball"),
-                "std": 5.0,
-            }
-        ),
-        "ball_distance": RewardTermCfg(
-            func=distance_to_ball_reward,
-            weight=1.0,
-            params={
-                "robot_cfg": SceneEntityCfg("robot"),
-                "ball_cfg": SceneEntityCfg("ball"),
-                "target_distance": 0.4,
-                "std": 0.25,
-            }
-        ),
-        "ball_dribble": RewardTermCfg(
-            func=ball_dribble_position,
-            weight=3.0,
-            params={
-                "robot_cfg": SceneEntityCfg("robot"),
-                "ball_cfg": SceneEntityCfg("ball"),
-                "target_distance": 0.4,
-                "std": 1.0,
-                "in_range_dist": 1.0,
-            }
-        ),
-        "ball_approach": RewardTermCfg(
-            func=ball_approach_alignment,
-            weight=2.0,
-            params={
-                "command_name": "twist",
-                "robot_cfg": SceneEntityCfg("robot"),
-                "ball_cfg": SceneEntityCfg("ball"),
-            }
-        ),
+        # "kick_contact": RewardTermCfg(
+        #     func=kick_contact_reward,
+        #     weight=50.0,
+        #     params={
+        #         "command_name": "twist",
+        #         "sensor_name": "robot_ball_collision",
+        #     }
+        # ),
+        # "kick_velocity": RewardTermCfg(
+        #     func=KickVelocityReward,
+        #     weight=50.0,
+        #     params={
+        #         "command_name": "twist",
+        #         "ball_cfg": SceneEntityCfg("ball"),
+        #         "std": 5.0,
+        #     }
+        # ),
+        # "ball_distance": RewardTermCfg(
+        #     func=distance_to_ball_reward,
+        #     weight=1.0,
+        #     params={
+        #         "robot_cfg": SceneEntityCfg("robot"),
+        #         "ball_cfg": SceneEntityCfg("ball"),
+        #         "target_distance": 0.4,
+        #         "std": 0.25,
+        #     }
+        # ),
+        # "ball_dribble": RewardTermCfg(
+        #     func=ball_dribble_position,
+        #     weight=3.0,
+        #     params={
+        #         "robot_cfg": SceneEntityCfg("robot"),
+        #         "ball_cfg": SceneEntityCfg("ball"),
+        #         "target_distance": 0.4,
+        #         "std": 1.0,
+        #         "in_range_dist": 1.0,
+        #     }
+        # ),
+        # "ball_approach": RewardTermCfg(
+        #     func=ball_approach_alignment,
+        #     weight=2.0,
+        #     params={
+        #         "command_name": "twist",
+        #         "robot_cfg": SceneEntityCfg("robot"),
+        #         "ball_cfg": SceneEntityCfg("ball"),
+        #     }
+        # ),
         "feet_swing": RewardTermCfg(
             func=feet_swing,
             weight=1.0,
