@@ -516,8 +516,8 @@ def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
             func=obs_pd_gains,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(
-                    # ".*Shoulder_Pitch.*", ".*Shoulder_Roll.*", ".*Elbow_Pitch.*", 
-                    # ".*Elbow_Yaw.*", 
+                    ".*Shoulder_Pitch.*", ".*Shoulder_Roll.*", ".*Elbow_Pitch.*", 
+                    ".*Elbow_Yaw.*", 
                     ".*Hip_Pitch.*", ".*Hip_Yaw.*", ".*Knee_Pitch.*"
                 ))
             }

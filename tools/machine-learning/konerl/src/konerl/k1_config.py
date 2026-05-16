@@ -185,6 +185,10 @@ ANKLE_ROLL = BuiltinPositionActuatorCfg(
 
 K1_ARTICULATION = EntityArticulationInfoCfg(
     actuators=(
+        SHOULDER_PITCH,
+        SHOULDER_ROLL,
+        ELBOW_PITCH,
+        ELBOW_YAW,
         HIP_PITCH,
         HIP_ROLL,
         HIP_YAW,

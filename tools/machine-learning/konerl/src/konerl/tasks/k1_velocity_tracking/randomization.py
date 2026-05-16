@@ -263,10 +263,10 @@ def make_events_cfg() -> dict[str, EventTermCfg]:
             func=dr.pd_gains,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(
-                    # ".*Shoulder_Pitch.*", 
-                    # ".*Shoulder_Roll.*",
-                    # ".*Elbow_Pitch.*",
-                    # ".*Elbow_Yaw.*",
+                    ".*Shoulder_Pitch.*", 
+                    ".*Shoulder_Roll.*",
+                    ".*Elbow_Pitch.*",
+                    ".*Elbow_Yaw.*",
 
                     ".*Hip_Pitch.*",
                     ".*Hip_Yaw.*",
