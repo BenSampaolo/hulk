@@ -15,6 +15,7 @@ from rsl_rl.utils.logger import Logger
 
 from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 from mjlab.rl.runner import MjlabOnPolicyRunner
+from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
 from .AMP import AMPDiscriminator, ObservationNormalizer, AMPOptimizer, AMPConfig, MocapBuffer
 
@@ -109,7 +110,7 @@ class SimpleAMPBuilder:
         return features
 
 
-class MjlabAMPOnPolicyRunner(MjlabOnPolicyRunner):
+class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
     """Mjlabs default on-policy runner with AMP"""
 
     alg: PPO
