@@ -46,6 +46,8 @@ class AMPConfig:
     batch_size: int = 1024
     gradient_penalty_weight: float = 10.0
     update_interval: int = 1
+    instance_noise_std: float = 0.05
+    target_accuracy: float = 0.95
 
 
 class AMPOptimizer:
@@ -136,16 +138,44 @@ class AMPOptimizer:
         # Determine Iterations
         iterations = int(amp_obs.shape[0] / self.config.batch_size)
         iterations = max(1, min(iterations, 10))
+        
+        # Track accuracy to allow early stopping (skipping updates)
+        skip_updates = False
 
         # Training Loop
         for _ in range(iterations):
+            if skip_updates:
+                break
+                
             fake_batch = self.replay_buffer.sample(self.config.batch_size)
             real_batch = self.expert_buffer.sample(self.config.batch_size)
+
+            # --- Inject Instance Noise ---
+            if self.config.instance_noise_std > 0:
+                fake_batch = fake_batch + torch.randn_like(fake_batch) * self.config.instance_noise_std
+                real_batch = real_batch + torch.randn_like(real_batch) * self.config.instance_noise_std
 
             self.optimizer.zero_grad()
 
             real_logits = self.discriminator(real_batch)
             fake_logits = self.discriminator(fake_batch)
+            
+            # --- Dynamic Update Skipping ---
+            acc_real = (real_logits > 0.0).float().mean().item()
+            acc_fake = (fake_logits < 0.0).float().mean().item()
+            acc_avg = (acc_real + acc_fake) / 2.0
+            
+            if acc_avg > self.config.target_accuracy:
+                skip_updates = True
+                
+                # Still log the skipped step metrics
+                self.metrics["amp/loss"].append(0.0)
+                self.metrics["amp/logits_real"].append(real_logits.mean().item())
+                self.metrics["amp/logits_fake"].append(fake_logits.mean().item())
+                self.metrics["amp/grad_penalty"].append(0.0)
+                self.metrics["amp/accuracy_real"].append(acc_real)
+                self.metrics["amp/accuracy_fake"].append(acc_fake)
+                continue
 
             # --- LSGAN Loss ---
             loss_real = torch.mean(torch.square(real_logits - 1))
@@ -177,8 +207,8 @@ class AMPOptimizer:
             self.metrics["amp/logits_real"].append(real_logits.mean().item())
             self.metrics["amp/logits_fake"].append(fake_logits.mean().item())
             self.metrics["amp/grad_penalty"].append(gp.item())
-            self.metrics["amp/accuracy_real"].append((real_logits > 0.0).float().mean().item())
-            self.metrics["amp/accuracy_fake"].append((fake_logits < 0.0).float().mean().item())
+            self.metrics["amp/accuracy_real"].append(acc_real)
+            self.metrics["amp/accuracy_fake"].append(acc_fake)
 
         # Compute Final Stats
         results: dict[str, float] = {k: float(np.mean(v))if len(v) > 0 else 0.0 for k, v in self.metrics.items()}

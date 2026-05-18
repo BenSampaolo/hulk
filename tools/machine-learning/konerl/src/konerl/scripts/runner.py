@@ -149,6 +149,9 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
         self.amp_config = AMPConfig(
             history_length=self.cfg.get("history_length", 5),
             batch_size=self.cfg.get("amp_batch_size", 1024),
+            weight_decay=self.cfg.get("amp_weight_decay", 1e-3),
+            gradient_penalty_weight=self.cfg.get("amp_gradient_penalty_weight", 1.0),
+            learning_rate=self.cfg.get("amp_learning_rate", 1e-5),
         )
 
         self.discriminator = AMPDiscriminator(
