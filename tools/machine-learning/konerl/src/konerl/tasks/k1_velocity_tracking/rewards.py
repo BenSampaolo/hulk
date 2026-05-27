@@ -13,6 +13,8 @@ from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity import mdp
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
+from konerl.scripts.AMP.optimizer import AMPOptimizer
+
 def get_yaw_from_quaternion(quat: torch.Tensor) -> torch.Tensor:
     """Extract yaw from a quaternion [w, x, y, z]."""
     w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
@@ -586,6 +588,49 @@ def action_gait_freq_penalty(
     freq_offset = getattr(gait_action, "freq_offset").squeeze(-1)
     
     return torch.square(freq_offset)
+
+class amp_reward:
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        self.env = env
+        self.cfg = cfg
+
+        self.amp_optimizer: AMPOptimizer | None = getattr(env, "amp_optimizer", None)
+
+        num_joints = cfg.params["asset_cfg"].joint_names.__len__()
+        self.amp_feature_dim = num_joints * 2 + 6  # joint pos, joint vel, root lin vel, root ang vel
+
+        self.amp_history = torch.zeros((self.env.num_envs, cfg.params["history_length"], self.amp_feature_dim), device=self.env.device)
+
+
+    def __call__(self, env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, history_length: int) -> torch.Tensor:
+        if not hasattr(env, "amp_optimizer"):
+            print("[AMP] Optimizer not found reward skipped")
+            return torch.zeros(env.num_envs, device=env.device)
+        if self.amp_optimizer is None:
+            self.amp_optimizer = getattr(env, "amp_optimizer")
+        
+        assert self.amp_optimizer is not None, "AMP optimizer is not set in the environment"
+
+        robot: Entity = env.scene[self.cfg.params["asset_cfg"].name]
+
+        joint_pos = robot.data.joint_pos[:, self.cfg.params["asset_cfg"].joint_ids]
+        joint_vel = robot.data.joint_vel[:, self.cfg.params["asset_cfg"].joint_ids]
+        root_vel = robot.data.root_link_lin_vel_b
+        root_ang_vel = robot.data.root_link_ang_vel_b
+
+        current_features = torch.cat([joint_pos, joint_vel, root_vel, root_ang_vel], dim=-1)
+
+        self.amp_history = torch.roll(self.amp_history, shifts=-1, dims=1)
+        self.amp_history[:, -1, :] = current_features
+
+        return self.amp_optimizer.calculate_amp_rewards(self.amp_history).squeeze(-1)
+    
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self.amp_history.fill_(0.0)
+        else:
+            self.amp_history[env_ids] = 0.0
+        
 
 def make_reward_cfg() -> dict[str, RewardTermCfg]:
     return {
