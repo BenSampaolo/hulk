@@ -32,6 +32,36 @@ K1_LEG_JOINT_NAMES: tuple[str, ...] = (
 
 K1_FULL_BODY_JOINT_NAMES: tuple[str, ...] = K1_ARM_JOINT_NAMES + K1_LEG_JOINT_NAMES
 
+# obs_pd_gains currently exposes kp for all actuators, then kd for all actuators,
+# in compiled actuator order rather than policy action/joint order.
+K1_ARM_GAIN_NAMES: tuple[str, ...] = (
+    "ALeft_Shoulder_Pitch",
+    "ARight_Shoulder_Pitch",
+    "Left_Shoulder_Roll",
+    "Right_Shoulder_Roll",
+    "Left_Elbow_Pitch",
+    "Right_Elbow_Pitch",
+    "Left_Elbow_Yaw",
+    "Right_Elbow_Yaw",
+)
+
+K1_LEG_GAIN_NAMES: tuple[str, ...] = (
+    "Left_Hip_Pitch",
+    "Right_Hip_Pitch",
+    "Left_Hip_Roll",
+    "Right_Hip_Roll",
+    "Left_Hip_Yaw",
+    "Right_Hip_Yaw",
+    "Left_Knee_Pitch",
+    "Right_Knee_Pitch",
+    "Left_Ankle_Pitch",
+    "Right_Ankle_Pitch",
+    "Left_Ankle_Roll",
+    "Right_Ankle_Roll",
+)
+
+K1_FULL_BODY_GAIN_NAMES: tuple[str, ...] = K1_ARM_GAIN_NAMES + K1_LEG_GAIN_NAMES
+
 
 TRUE_VECTOR3 = ReflectionSpec(perm=[0, 1, 2], sign=[1, -1, 1])
 """Polar vector under sagittal mirror, e.g. position, linear velocity, gravity, force."""
@@ -47,6 +77,30 @@ LEFT_RIGHT_VECTOR3_BLOCKS = ReflectionSpec(perm=[3, 4, 5, 0, 1, 2], sign=[1, -1,
 K1_ARM_JOINT_SPEC = ReflectionSpec.from_joint_names(list(K1_ARM_JOINT_NAMES))
 K1_LEG_JOINT_SPEC = ReflectionSpec.from_joint_names(list(K1_LEG_JOINT_NAMES))
 K1_FULL_BODY_JOINT_SPEC = ReflectionSpec.from_joint_names(list(K1_FULL_BODY_JOINT_NAMES))
+
+
+def _left_right_scalar_spec(names: tuple[str, ...]) -> ReflectionSpec:
+    perm = list(range(len(names)))
+    name_to_idx = {name: i for i, name in enumerate(names)}
+    for i, name in enumerate(names):
+        if "Left" in name:
+            partner = name.replace("Left", "Right")
+        elif "Right" in name:
+            partner = name.replace("Right", "Left")
+        else:
+            continue
+        if partner in name_to_idx:
+            perm[i] = name_to_idx[partner]
+    return ReflectionSpec(perm=perm, sign=[1] * len(names))
+
+
+def _kp_kd_gain_spec(names: tuple[str, ...]) -> ReflectionSpec:
+    scalar_spec = _left_right_scalar_spec(names)
+    return scalar_spec.combine(scalar_spec)
+
+
+K1_LEG_GAIN_SPEC = _kp_kd_gain_spec(K1_LEG_GAIN_NAMES)
+K1_FULL_BODY_GAIN_SPEC = _kp_kd_gain_spec(K1_FULL_BODY_GAIN_NAMES)
 
 # Backward-compatible leg-only aliases.
 K1_JOINT_SPEC = K1_LEG_JOINT_SPEC
@@ -76,7 +130,7 @@ def _actor_spec(joint_spec: ReflectionSpec, action_spec: ReflectionSpec) -> Refl
     )
 
 
-def _critic_spec(joint_spec: ReflectionSpec, action_spec: ReflectionSpec, gain_dim: int) -> ReflectionSpec:
+def _critic_spec(joint_spec: ReflectionSpec, action_spec: ReflectionSpec, gain_spec: ReflectionSpec) -> ReflectionSpec:
     return ReflectionSpec.combine_many(
         [
             AXIAL_VECTOR3,  # base_ang_vel
@@ -94,8 +148,8 @@ def _critic_spec(joint_spec: ReflectionSpec, action_spec: ReflectionSpec, gain_d
             SCALAR,  # trunk_mass
             LEFT_RIGHT_SCALARS,  # foot_friction
             TRUE_VECTOR3,  # base_com
-            ReflectionSpec.identity(gain_dim),  # default_KpKd_gains (positive gains; order is env-specific)
-            ReflectionSpec.identity(gain_dim),  # special_KpKd_gains (positive gains; order is env-specific)
+            gain_spec,  # default_KpKd_gains: kp block then kd block in actuator order
+            gain_spec,  # special_KpKd_gains: kp block then kd block in actuator order
             joint_spec,  # encoder_bias
             TRUE_VECTOR3,  # push_force
         ]
@@ -103,13 +157,13 @@ def _critic_spec(joint_spec: ReflectionSpec, action_spec: ReflectionSpec, gain_d
 
 
 K1_VELOCITY_ACTOR_SPEC = _actor_spec(K1_LEG_JOINT_SPEC, K1_LEG_JOINT_SPEC)
-K1_VELOCITY_CRITIC_SPEC = _critic_spec(K1_LEG_JOINT_SPEC, K1_LEG_JOINT_SPEC, gain_dim=24)
+K1_VELOCITY_CRITIC_SPEC = _critic_spec(K1_LEG_JOINT_SPEC, K1_LEG_JOINT_SPEC, K1_LEG_GAIN_SPEC)
 
 K1_FULL_BODY_VELOCITY_ACTOR_SPEC = _actor_spec(K1_FULL_BODY_JOINT_SPEC, K1_FULL_BODY_ACTION_SPEC)
 K1_FULL_BODY_VELOCITY_CRITIC_SPEC = _critic_spec(
     K1_FULL_BODY_JOINT_SPEC,
     K1_FULL_BODY_ACTION_SPEC,
-    gain_dim=40,
+    K1_FULL_BODY_GAIN_SPEC,
 )
 
 

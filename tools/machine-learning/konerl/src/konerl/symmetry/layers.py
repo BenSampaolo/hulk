@@ -24,26 +24,25 @@ class ReflectionEquivariantLinear(nn.Module):
         self.weight_raw = nn.Parameter(torch.randn(reflection_out.dim, reflection_in.dim) * 0.02)
         self.bias_raw = nn.Parameter(torch.zeros(reflection_out.dim)) if bias else None
 
+    def _project_weight(self, weight: torch.Tensor) -> torch.Tensor:
+        reflected_weight = self.reflection_out.apply(self.reflection_in.apply(weight, dim=1), dim=0)
+        return 0.5 * (weight + reflected_weight)
+
+    def _project_bias(self, bias: torch.Tensor) -> torch.Tensor:
+        reflected_bias = self.reflection_out.apply(bias, dim=0)
+        return 0.5 * (bias + reflected_bias)
+
     @torch.no_grad()
     def project_parameters_(self) -> None:
-        device = self.weight_raw.device
-        self.reflection_in.to(device)
-        self.reflection_out.to(device)
-
-        weight = self.weight_raw
-        reflected_weight = self.reflection_out.apply(self.reflection_in.apply(weight, dim=1), dim=0)
-        self.weight_raw.copy_(0.5 * (weight + reflected_weight))
-
+        self.weight_raw.copy_(self._project_weight(self.weight_raw))
         if self.bias_raw is not None:
-            bias = self.bias_raw
-            reflected_bias = self.reflection_out.apply(bias, dim=0)
-            self.bias_raw.copy_(0.5 * (bias + reflected_bias))
+            self.bias_raw.copy_(self._project_bias(self.bias_raw))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        self.project_parameters_()
-        y = torch.matmul(x, self.weight_raw.T)
+        weight = self._project_weight(self.weight_raw)
+        y = torch.matmul(x, weight.T)
         if self.bias_raw is not None:
-            y = y + self.bias_raw
+            y = y + self._project_bias(self.bias_raw)
         return y
 
 
@@ -78,21 +77,62 @@ class ReflectionEquivariantMlp(nn.Sequential):
 
 
 class ReflectionInvariantify(nn.Module):
-    """Convert an equivariant mixed representation to an invariant one.
+    """Convert an equivariant mixed representation to invariant features.
 
-    Even channels are copied. Odd channels are made even with ``square`` or
-    ``abs`` so a following ordinary MLP can produce invariant scalar values.
+    Fixed even channels pass through. Fixed odd channels are made even with
+    ``square`` or ``abs``. Swapped channel pairs are converted to an invariant
+    even combination plus an invariantized odd combination.
     """
 
     def __init__(self, spec: ReflectionSpec, mode: Literal["square", "abs"] = "square") -> None:
         super().__init__()
         self.spec = spec
         self.operation = {"square": torch.square, "abs": torch.abs}[mode]
-        self.register_buffer("even_idx", spec.even_indices())
-        self.register_buffer("odd_idx", spec.odd_indices())
+
+        fixed_even: list[int] = []
+        fixed_odd: list[int] = []
+        pair_left: list[int] = []
+        pair_right: list[int] = []
+        pair_sign: list[int] = []
+        seen: set[int] = set()
+        for i, j in enumerate(spec.perm):
+            if i in seen:
+                continue
+            seen.add(i)
+            if i == j:
+                if spec.sign[i] > 0:
+                    fixed_even.append(i)
+                else:
+                    fixed_odd.append(i)
+                continue
+            seen.add(j)
+            pair_left.append(i)
+            pair_right.append(j)
+            pair_sign.append(spec.sign[i])
+
+        self.register_buffer("fixed_even_idx", torch.tensor(fixed_even, dtype=torch.long))
+        self.register_buffer("fixed_odd_idx", torch.tensor(fixed_odd, dtype=torch.long))
+        self.register_buffer("pair_left_idx", torch.tensor(pair_left, dtype=torch.long))
+        self.register_buffer("pair_right_idx", torch.tensor(pair_right, dtype=torch.long))
+        self.register_buffer("pair_sign", torch.tensor(pair_sign, dtype=torch.float32))
         self.out_spec = ReflectionSpec.hidden(even_dim=spec.dim, odd_dim=0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        even = x[..., self.even_idx]
-        odd = self.operation(x[..., self.odd_idx])
-        return torch.cat([even, odd], dim=-1)
+        pieces: list[torch.Tensor] = []
+        if self.fixed_even_idx.numel() > 0:
+            pieces.append(x[..., self.fixed_even_idx])
+        if self.pair_left_idx.numel() > 0:
+            left = x[..., self.pair_left_idx]
+            right = x[..., self.pair_right_idx]
+            sign = self.pair_sign.to(device=x.device, dtype=x.dtype)
+            pieces.append(0.5 * (left + sign * right))
+        if self.fixed_odd_idx.numel() > 0:
+            pieces.append(self.operation(x[..., self.fixed_odd_idx]))
+        if self.pair_left_idx.numel() > 0:
+            left = x[..., self.pair_left_idx]
+            right = x[..., self.pair_right_idx]
+            sign = self.pair_sign.to(device=x.device, dtype=x.dtype)
+            pieces.append(self.operation(0.5 * (left - sign * right)))
+        if not pieces:
+            return x.new_empty(*x.shape[:-1], 0)
+        return torch.cat(pieces, dim=-1)
