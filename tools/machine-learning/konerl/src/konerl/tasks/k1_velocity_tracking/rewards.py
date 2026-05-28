@@ -67,6 +67,17 @@ def target_base_height(
     asset: Entity = env.scene[asset_cfg.name]
     height_error = torch.abs(asset.data.root_link_pos_w[:, 2] - target_height)
     return torch.exp(-height_error / std**2) 
+
+
+def base_height_below_l2(
+    env: ManagerBasedRlEnv,
+    threshold: float = 0.48,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Continuous penalty for base height below a minimum threshold."""
+    asset: Entity = env.scene[asset_cfg.name]
+    height_error = torch.clamp(threshold - asset.data.root_link_pos_w[:, 2], min=0.0)
+    return torch.square(height_error)
     
 class TargetBaseHeightMean:
     def __init__(
@@ -622,6 +633,11 @@ def make_reward_cfg(*, amp: bool = False) -> dict[str, RewardTermCfg]:
                 "ema_alpha": 0.1,
                 "std": math.sqrt(0.3),
             },
+        ),
+        "low_base_height": RewardTermCfg(
+            func=base_height_below_l2,
+            weight=-10.0,
+            params={"threshold": 0.48},
         ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
         # "electrical_power_cost": RewardTermCfg(
