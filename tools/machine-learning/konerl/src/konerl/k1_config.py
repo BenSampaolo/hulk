@@ -8,6 +8,17 @@ from mjlab.utils.spec_config import CollisionCfg
 K1_XML = Path("model/K1.xml").resolve()
 assert K1_XML.exists()
 
+K1_ARM_JOINT_NAMES: tuple[str, ...] = (
+    "ALeft_Shoulder_Pitch",
+    "Left_Shoulder_Roll",
+    "Left_Elbow_Pitch",
+    "Left_Elbow_Yaw",
+    "ARight_Shoulder_Pitch",
+    "Right_Shoulder_Roll",
+    "Right_Elbow_Pitch",
+    "Right_Elbow_Yaw",
+)
+
 
 def get_assets(meshdir: str) -> dict[str, bytes]:
     assets: dict[str, bytes] = {}
@@ -22,12 +33,18 @@ def get_assets(meshdir: str) -> dict[str, bytes]:
     return assets
 
 
-def get_spec() -> mujoco.MjSpec:
+def get_spec(*, control_arms: bool = False) -> mujoco.MjSpec:
     spec = mujoco.MjSpec.from_file(str(K1_XML))
     for geom in tuple(spec.geoms):
         if geom.name == "ground":
             spec.delete(geom)  # type: ignore[attr-defined]
             break
+    if not control_arms:
+        # The XML keeps arm joints available for full-body policies. For leg-only
+        # policies those joints must be welded out; otherwise play/training leaves
+        # passive, unactuated arms flapping around.
+        for joint_name in K1_ARM_JOINT_NAMES:
+            spec.delete(spec.joint(joint_name))
     spec.assets = get_assets(spec.meshdir)
     return spec
 
@@ -219,7 +236,7 @@ def get_k1_robot_cfg(*, control_arms: bool = False) -> EntityCfg:
     return EntityCfg(
         init_state=ZERO_POSE,
         collisions=(FULL_COLLISION,),
-        spec_fn=get_spec,
+        spec_fn=lambda: get_spec(control_arms=control_arms),
         articulation=K1_FULL_BODY_ARTICULATION if control_arms else K1_LEG_ARTICULATION,
     )
 
