@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import cast
+
 import torch
 from rsl_rl.modules import EmpiricalNormalization
 
@@ -24,15 +26,21 @@ class EquivariantEmpiricalNormalization(EmpiricalNormalization):
 
     @torch.no_grad()
     def _symmetrize_stats(self) -> None:
-        sign = self.sign.to(device=self._mean.device, dtype=self._mean.dtype).view(1, -1)
-        perm = self.perm.to(device=self._mean.device)
+        mean = cast(torch.Tensor, self._mean)
+        var = cast(torch.Tensor, self._var)
+        std = cast(torch.Tensor, self._std)
+        sign_buffer = cast(torch.Tensor, self.sign)
+        perm_buffer = cast(torch.Tensor, self.perm)
 
-        reflected_mean = torch.index_select(self._mean * sign, dim=1, index=perm)
-        self._mean.copy_(0.5 * (self._mean + reflected_mean))
+        sign = sign_buffer.to(device=mean.device, dtype=mean.dtype).view(1, -1)
+        perm = perm_buffer.to(device=mean.device)
 
-        reflected_var = torch.index_select(self._var, dim=1, index=perm)
-        self._var.copy_(0.5 * (self._var + reflected_var))
-        self._std.copy_(torch.sqrt(self._var))
+        reflected_mean = torch.index_select(mean * sign, dim=1, index=perm)
+        mean.copy_(0.5 * (mean + reflected_mean))
+
+        reflected_var = torch.index_select(var, dim=1, index=perm)
+        var.copy_(0.5 * (var + reflected_var))
+        std.copy_(torch.sqrt(var))
 
     @torch.jit.unused
     def update(self, x: torch.Tensor) -> None:

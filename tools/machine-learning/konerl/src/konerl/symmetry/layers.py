@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
-from typing import Literal
+from typing import Callable, Literal, cast
 
 import torch
 from torch import nn
@@ -87,7 +87,7 @@ class ReflectionInvariantify(nn.Module):
     def __init__(self, spec: ReflectionSpec, mode: Literal["square", "abs"] = "square") -> None:
         super().__init__()
         self.spec = spec
-        self.operation = {"square": torch.square, "abs": torch.abs}[mode]
+        self.operation: Callable[[torch.Tensor], torch.Tensor] = {"square": torch.square, "abs": torch.abs}[mode]
 
         fixed_even: list[int] = []
         fixed_odd: list[int] = []
@@ -118,20 +118,26 @@ class ReflectionInvariantify(nn.Module):
         self.out_spec = ReflectionSpec.hidden(even_dim=spec.dim, odd_dim=0)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        fixed_even_idx = cast(torch.Tensor, self.fixed_even_idx)
+        fixed_odd_idx = cast(torch.Tensor, self.fixed_odd_idx)
+        pair_left_idx = cast(torch.Tensor, self.pair_left_idx)
+        pair_right_idx = cast(torch.Tensor, self.pair_right_idx)
+        pair_sign = cast(torch.Tensor, self.pair_sign)
+
         pieces: list[torch.Tensor] = []
-        if self.fixed_even_idx.numel() > 0:
-            pieces.append(x[..., self.fixed_even_idx])
-        if self.pair_left_idx.numel() > 0:
-            left = x[..., self.pair_left_idx]
-            right = x[..., self.pair_right_idx]
-            sign = self.pair_sign.to(device=x.device, dtype=x.dtype)
+        if fixed_even_idx.numel() > 0:
+            pieces.append(x[..., fixed_even_idx])
+        if pair_left_idx.numel() > 0:
+            left = x[..., pair_left_idx]
+            right = x[..., pair_right_idx]
+            sign = pair_sign.to(device=x.device, dtype=x.dtype)
             pieces.append(0.5 * (left + sign * right))
-        if self.fixed_odd_idx.numel() > 0:
-            pieces.append(self.operation(x[..., self.fixed_odd_idx]))
-        if self.pair_left_idx.numel() > 0:
-            left = x[..., self.pair_left_idx]
-            right = x[..., self.pair_right_idx]
-            sign = self.pair_sign.to(device=x.device, dtype=x.dtype)
+        if fixed_odd_idx.numel() > 0:
+            pieces.append(self.operation(x[..., fixed_odd_idx]))
+        if pair_left_idx.numel() > 0:
+            left = x[..., pair_left_idx]
+            right = x[..., pair_right_idx]
+            sign = pair_sign.to(device=x.device, dtype=x.dtype)
             pieces.append(self.operation(0.5 * (left - sign * right)))
         if not pieces:
             return x.new_empty(*x.shape[:-1], 0)

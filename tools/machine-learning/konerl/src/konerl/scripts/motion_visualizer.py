@@ -15,7 +15,8 @@ from mjlab.tasks.registry import list_tasks, load_env_cfg, load_rl_cfg
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
-from konerl.scripts.runner import SimpleAMPBuilder
+from konerl.k1_config import K1_DEFAULT_JOINT_POS
+from konerl.scripts.AMP.features import MOCAP_TO_K1
 
 
 class MocapPlaybackPolicy:
@@ -30,8 +31,6 @@ class MocapPlaybackPolicy:
         self.dof_vel = raw_mocap_data["dof_vel"]
         self.num_frames = self.dof_pos.shape[0]
         self.frame_idx = 0
-
-        self.default_offset = np.array(SimpleAMPBuilder.default_offset)
         self.action_scale = action_scale
 
         self.active_joints = []
@@ -42,12 +41,16 @@ class MocapPlaybackPolicy:
                     if hasattr(act, 'target_names_expr'):
                         self.active_joints.extend(act.target_names_expr)
         if not self.active_joints:
-            self.active_joints = list(SimpleAMPBuilder.MOCAP_TO_K1.values())
+            self.active_joints = list(MOCAP_TO_K1.values())
+        self.default_offset = np.array(
+            [K1_DEFAULT_JOINT_POS.get(joint_name, K1_DEFAULT_JOINT_POS[".*"]) for joint_name in self.active_joints],
+            dtype=np.float32,
+        )
 
         self.model = getattr(self.unwrapped_env, "model", None)
         self.data = getattr(self.unwrapped_env, "data", None)
         
-        k1_to_mocap = {v: k for k, v in SimpleAMPBuilder.MOCAP_TO_K1.items()}
+        k1_to_mocap = {v: k for k, v in MOCAP_TO_K1.items()}
         node_names = raw_mocap_data['link_body_list']
         
         self.mocap_to_mj_map = []

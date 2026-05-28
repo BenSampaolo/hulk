@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from typing import Any, cast
 
 import torch
 from tensordict import TensorDict
@@ -161,9 +162,10 @@ class TestK1EquivariantModel(unittest.TestCase):
 
         assert actor.distribution is not None
         with torch.no_grad():
-            actor.distribution.log_std_param.copy_(torch.arange(K1_ACTION_SPEC.dim, dtype=torch.float32))
+            log_std_param = cast(torch.Tensor, actor.distribution.log_std_param)
+            log_std_param.copy_(torch.arange(K1_ACTION_SPEC.dim, dtype=torch.float32))
 
-        actor(obs, stochastic_output=True)
+        cast(Any, actor)(obs, stochastic_output=True)
         std = actor.output_std[0]
 
         torch.testing.assert_close(std, std[K1_ACTION_SPEC._perm_tensor])
