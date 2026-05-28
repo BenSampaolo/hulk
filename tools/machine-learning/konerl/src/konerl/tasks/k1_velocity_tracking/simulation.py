@@ -118,7 +118,6 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"], *, control_a
         reduce="none",
         num_slots=1,
     )
-
     return SceneCfg(
         terrain=terrain_cfg,
         sensors=(feet_ground_cfg, self_collision_cfg, foot_height_scan_cfg, robot_ball_collision_cfg),
@@ -147,6 +146,7 @@ def make_velocity_env_cfg(play: bool, *, amp: bool = False, control_arms: bool =
         rewards=make_reward_cfg(
             amp=amp,
             amp_joint_names=K1_AMP_FULL_BODY_JOINT_NAMES if control_arms else K1_AMP_JOINT_NAMES,
+            arm_default_pose=control_arms,
         ),
         terminations=make_termination_cfg(),
         curriculum=make_curriculum_cfg(terrain_type),

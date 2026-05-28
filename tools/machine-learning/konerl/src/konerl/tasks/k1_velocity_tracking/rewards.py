@@ -15,7 +15,7 @@ from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
 from konerl.scripts.AMP.optimizer import AMPOptimizer
 from konerl.scripts.AMP.cache import AMPStateCache
-from konerl.scripts.AMP.features import K1_AMP_JOINT_NAMES
+from konerl.scripts.AMP.features import K1_AMP_ARM_JOINT_NAMES, K1_AMP_JOINT_NAMES
 
 def get_yaw_from_quaternion(quat: torch.Tensor) -> torch.Tensor:
     """Extract yaw from a quaternion [w, x, y, z]."""
@@ -537,6 +537,23 @@ class feet_swing_height:
     )
     return cost
 
+def contact_any(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
+  """Penalty signal for any contact reported by a contact sensor."""
+  sensor: ContactSensor = env.scene[sensor_name]
+  if sensor.data.found is None:
+    return torch.zeros(env.num_envs, device=env.device)
+  found = sensor.data.found.reshape(env.num_envs, -1)
+  return torch.any(found > 0.5, dim=1).float()
+
+
+def joint_default_pose_l2(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+  """Mean squared deviation from configured default joint pose."""
+  asset: Entity = env.scene[asset_cfg.name]
+  joint_ids = asset_cfg.joint_ids
+  error = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
+  return torch.mean(torch.square(error), dim=1)
+
+
 def soft_landing(
   env: ManagerBasedRlEnv,
   sensor_name: str,
@@ -611,7 +628,12 @@ class amp_reward:
             cache.reset(env_ids)
         
 
-def make_reward_cfg(*, amp: bool = False, amp_joint_names: tuple[str, ...] = K1_AMP_JOINT_NAMES) -> dict[str, RewardTermCfg]:
+def make_reward_cfg(
+    *,
+    amp: bool = False,
+    amp_joint_names: tuple[str, ...] = K1_AMP_JOINT_NAMES,
+    arm_default_pose: bool = False,
+) -> dict[str, RewardTermCfg]:
     rewards = {
         "upright": RewardTermCfg(
             func=mdp.upright,
@@ -640,6 +662,11 @@ def make_reward_cfg(*, amp: bool = False, amp_joint_names: tuple[str, ...] = K1_
             params={"threshold": 0.48},
         ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
+        "self_collision": RewardTermCfg(
+            func=contact_any,
+            weight=-1.0,
+            params={"sensor_name": "self_collision"},
+        ),
         # "electrical_power_cost": RewardTermCfg(
         #     func=mdp.electrical_power_cost, 
         #     weight=-0.003,
@@ -717,6 +744,19 @@ def make_reward_cfg(*, amp: bool = False, amp_joint_names: tuple[str, ...] = K1_
             },
         ),
     }
+
+    if arm_default_pose:
+        rewards["arm_default_pose"] = RewardTermCfg(
+            func=joint_default_pose_l2,
+            weight=-0.15,
+            params={
+                "asset_cfg": SceneEntityCfg(
+                    "robot",
+                    joint_names=K1_AMP_ARM_JOINT_NAMES,
+                    preserve_order=True,
+                ),
+            },
+        )
 
     if amp:
         rewards["amp"] = RewardTermCfg(
