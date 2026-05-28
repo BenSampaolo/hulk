@@ -2,6 +2,7 @@ from .discriminator import AMPDiscriminator
 from .normalizer import ObservationNormalizer
 from .optimizer import AMPOptimizer, AMPConfig
 from .mocap_buffer import MocapBuffer
+from .cache import AMPStateCache
 from .features import (
     K1_AMP_JOINT_NAMES,
     MOCAP_TO_K1,
@@ -17,6 +18,7 @@ __all__ = [
     "ObservationNormalizer",
     "AMPOptimizer",
     "AMPConfig",
+    "AMPStateCache",
     "MocapBuffer",
     "K1_AMP_JOINT_NAMES",
     "MOCAP_TO_K1",

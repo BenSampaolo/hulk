@@ -21,12 +21,10 @@ from .AMP import (
     AMPDiscriminator,
     AMPOptimizer,
     AMPConfig,
+    AMPStateCache,
     MocapBuffer,
     MOCAP_TO_K1,
-    amp_features_from_robot_indices,
     controlled_joint_names_from_env,
-    joint_indices,
-    update_amp_history_,
 )
 
 
@@ -110,12 +108,14 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
         setattr(self.env.unwrapped, "amp_optimizer", self.amp_optimizer)
 
         self.robot = self.env.unwrapped.scene["robot"]
-        self.amp_joint_ids = joint_indices(self.robot, self.active_joints, self.device)
-        self.amp_features = torch.empty((self.num_envs, self.amp_feature_dim), device=self.device)
-        self.amp_history = torch.zeros((self.num_envs, self.amp_config.history_length, self.amp_feature_dim), device=self.device)
-        self.amp_history_shift = torch.empty(
-            (self.num_envs, max(self.amp_config.history_length - 1, 0), self.amp_feature_dim), device=self.device
+        self.amp_cache = AMPStateCache(
+            robot=self.robot,
+            joint_names=self.active_joints,
+            num_envs=self.num_envs,
+            history_length=self.amp_config.history_length,
+            device=self.device,
         )
+        setattr(self.env.unwrapped, "amp_cache", self.amp_cache)
 
     def _broadcast_amp_state(self) -> None:
         if not self.is_distributed:
@@ -134,7 +134,7 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
         Map the current state (from 'obs' or 'env.unwrapped') to the AMP feature space.
         """
         del env, obs
-        return amp_features_from_robot_indices(self.robot, self.amp_joint_ids, self.amp_features)
+        return self.amp_cache.compute_features()
 
     def save(self, path: str, infos=None) -> None:
         amp_state = {
@@ -198,14 +198,11 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
                         check_nan(obs, rewards, dones)
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
                     
-                    amp_features = self._compute_amp_features(self.env, obs)
-                    update_amp_history_(self.amp_history, amp_features, self.amp_history_shift)
-                    
                     reset_env_ids = dones.nonzero(as_tuple=False).squeeze(-1)
                     if len(reset_env_ids) > 0:
-                        self.amp_history[reset_env_ids] = amp_features[reset_env_ids].unsqueeze(1).expand(-1, self.amp_config.history_length, -1)
-                    
-                    amp_rollout_data[step_idx].copy_(self.amp_history)
+                        self.amp_cache.refresh_reset_envs(reset_env_ids)
+
+                    amp_rollout_data[step_idx].copy_(self.amp_cache.history)
 
                     self.alg.process_env_step(obs, rewards, dones, extras)
                     intrinsic_rewards = self.alg.intrinsic_rewards if self.cfg["algorithm"]["rnd_cfg"] else None

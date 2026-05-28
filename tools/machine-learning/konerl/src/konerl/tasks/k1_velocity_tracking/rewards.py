@@ -14,12 +14,8 @@ from mjlab.tasks.velocity import mdp
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
 from konerl.scripts.AMP.optimizer import AMPOptimizer
-from konerl.scripts.AMP.features import (
-    K1_AMP_JOINT_NAMES,
-    amp_features_from_robot_indices,
-    joint_indices,
-    update_amp_history_,
-)
+from konerl.scripts.AMP.cache import AMPStateCache
+from konerl.scripts.AMP.features import K1_AMP_JOINT_NAMES
 
 def get_yaw_from_quaternion(quat: torch.Tensor) -> torch.Tensor:
     """Extract yaw from a quaternion [w, x, y, z]."""
@@ -562,18 +558,24 @@ class amp_reward:
 
         self.amp_optimizer: AMPOptimizer | None = getattr(env, "amp_optimizer", None)
 
-        self.joint_names = tuple(cfg.params["asset_cfg"].joint_names or ())
-        if not self.joint_names:
+        joint_names = tuple(cfg.params["asset_cfg"].joint_names or ())
+        if not joint_names:
             raise ValueError("AMP reward requires explicit asset_cfg.joint_names")
-        self.amp_feature_dim = len(self.joint_names) * 2 + 6  # joint pos, joint vel, root lin vel, root ang vel
-
-        self.robot: Entity = env.scene[cfg.params["asset_cfg"].name]
-        self.joint_ids = joint_indices(self.robot, self.joint_names, env.device)
-        self.amp_features = torch.empty((self.env.num_envs, self.amp_feature_dim), device=self.env.device)
-        self.amp_history = torch.zeros((self.env.num_envs, cfg.params["history_length"], self.amp_feature_dim), device=self.env.device)
-        self.amp_history_shift = torch.empty(
-            (self.env.num_envs, max(cfg.params["history_length"] - 1, 0), self.amp_feature_dim), device=self.env.device
+        self.cache = AMPStateCache(
+            robot=env.scene[cfg.params["asset_cfg"].name],
+            joint_names=joint_names,
+            num_envs=env.num_envs,
+            history_length=cfg.params["history_length"],
+            device=env.device,
         )
+        if not hasattr(env, "amp_cache"):
+            setattr(env, "amp_cache", self.cache)
+
+    def _cache(self, env: ManagerBasedRlEnv) -> AMPStateCache:
+        cache = getattr(env, "amp_cache", self.cache)
+        if cache is not self.cache:
+            self.cache = cache
+        return self.cache
 
 
     def __call__(self, env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, history_length: int) -> torch.Tensor:
@@ -585,16 +587,17 @@ class amp_reward:
         assert self.amp_optimizer is not None, "AMP optimizer is not set in the environment"
 
         del asset_cfg, history_length
-        current_features = amp_features_from_robot_indices(self.robot, self.joint_ids, self.amp_features)
-        update_amp_history_(self.amp_history, current_features, self.amp_history_shift)
+        cache = self._cache(env)
+        cache.update()
 
-        return self.amp_optimizer.calculate_amp_rewards(self.amp_history).squeeze(-1)
+        return self.amp_optimizer.calculate_amp_rewards(cache.history).squeeze(-1)
     
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        cache = self._cache(self.env)
         if env_ids is None:
-            self.amp_history.fill_(0.0)
+            cache.reset()
         else:
-            self.amp_history[env_ids] = 0.0
+            cache.reset(env_ids)
         
 
 def make_reward_cfg(*, amp: bool = False) -> dict[str, RewardTermCfg]:
