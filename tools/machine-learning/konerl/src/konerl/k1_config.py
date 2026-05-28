@@ -1,4 +1,6 @@
 from pathlib import Path
+import math
+from typing import Any, cast
 
 import mujoco
 from mjlab.actuator.builtin_actuator import BuiltinPositionActuatorCfg as BuiltinPositionActuatorCfg
@@ -19,6 +21,28 @@ K1_ARM_JOINT_NAMES: tuple[str, ...] = (
     "Right_Elbow_Yaw",
 )
 
+K1_DEFAULT_JOINT_POS: dict[str, float] = {
+    "ALeft_Shoulder_Pitch": 0.25,
+    "Left_Shoulder_Roll": -1.4,
+    "Left_Elbow_Pitch": 0.15,
+    "Left_Elbow_Yaw": -2.25,
+    "ARight_Shoulder_Pitch": 0.25,
+    "Right_Shoulder_Roll": 1.4,
+    "Right_Elbow_Pitch": 0.15,
+    "Right_Elbow_Yaw": 2.25,
+    "Left_Hip_Pitch": -0.3,
+    "Left_Hip_Roll": 0.1,
+    "Left_Knee_Pitch": 0.6,
+    "Left_Ankle_Pitch": -0.3,
+    "Left_Ankle_Roll": -0.1,
+    "Right_Hip_Pitch": -0.3,
+    "Right_Hip_Roll": -0.1,
+    "Right_Knee_Pitch": 0.6,
+    "Right_Ankle_Pitch": -0.3,
+    "Right_Ankle_Roll": 0.1,
+    ".*": 0.0,
+}
+
 
 def get_assets(meshdir: str) -> dict[str, bytes]:
     assets: dict[str, bytes] = {}
@@ -33,6 +57,37 @@ def get_assets(meshdir: str) -> dict[str, bytes]:
     return assets
 
 
+def _axis_angle_quat(axis, angle: float) -> tuple[float, float, float, float]:
+    norm = math.sqrt(axis[0] * axis[0] + axis[1] * axis[1] + axis[2] * axis[2])
+    if norm == 0.0:
+        return (1.0, 0.0, 0.0, 0.0)
+    s = math.sin(0.5 * angle) / norm
+    return (math.cos(0.5 * angle), axis[0] * s, axis[1] * s, axis[2] * s)
+
+
+def _mul_quat(a, b) -> tuple[float, float, float, float]:
+    return (
+        a[0] * b[0] - a[1] * b[1] - a[2] * b[2] - a[3] * b[3],
+        a[0] * b[1] + a[1] * b[0] + a[2] * b[3] - a[3] * b[2],
+        a[0] * b[2] - a[1] * b[3] + a[2] * b[0] + a[3] * b[1],
+        a[0] * b[3] + a[1] * b[2] - a[2] * b[1] + a[3] * b[0],
+    )
+
+
+def _bake_joint_pose_into_body(spec: mujoco.MjSpec, joint_name: str, joint_pos: float) -> None:
+    joint = cast(Any, spec).joint(joint_name)
+    body = joint.parent
+    joint_quat = _axis_angle_quat(joint.axis, joint_pos)
+    body_quat = tuple(float(x) for x in body.quat)
+    body.alt.type = mujoco.mjtOrientation.mjORIENTATION_QUAT
+    body.quat[:] = _mul_quat(joint_quat, body_quat)
+
+
+def _bake_default_arm_pose(spec: mujoco.MjSpec) -> None:
+    for joint_name in K1_ARM_JOINT_NAMES:
+        _bake_joint_pose_into_body(spec, joint_name, K1_DEFAULT_JOINT_POS[joint_name])
+
+
 def get_spec(*, control_arms: bool = False) -> mujoco.MjSpec:
     spec = mujoco.MjSpec.from_file(str(K1_XML))
     for geom in tuple(spec.geoms):
@@ -40,11 +95,12 @@ def get_spec(*, control_arms: bool = False) -> mujoco.MjSpec:
             spec.delete(geom)  # type: ignore[attr-defined]
             break
     if not control_arms:
-        # The XML keeps arm joints available for full-body policies. For leg-only
-        # policies those joints must be welded out; otherwise play/training leaves
-        # passive, unactuated arms flapping around.
+        # XML zero is a neutral T-pose. Bake the configured K1 default arm pose
+        # before welding out arm joints for leg-only policies.
+        _bake_default_arm_pose(spec)
+        spec_any = cast(Any, spec)
         for joint_name in K1_ARM_JOINT_NAMES:
-            spec.delete(spec.joint(joint_name))
+            spec_any.delete(spec_any.joint(joint_name))
     spec.assets = get_assets(spec.meshdir)
     return spec
 
@@ -53,27 +109,7 @@ def get_spec(*, control_arms: bool = False) -> mujoco.MjSpec:
 
 ZERO_POSE = EntityCfg.InitialStateCfg(
     pos=(0, 0, 0.6),
-    joint_pos={
-        "ALeft_Shoulder_Pitch": 0.25,
-        "Left_Shoulder_Roll": -1.4,
-        "Left_Elbow_Pitch": 0.15,
-        "Left_Elbow_Yaw": -2.25,
-        "ARight_Shoulder_Pitch": 0.25,
-        "Right_Shoulder_Roll": 1.4,
-        "Right_Elbow_Pitch": 0.15,
-        "Right_Elbow_Yaw": 2.25,
-        "Left_Hip_Pitch": -0.3,
-        "Left_Hip_Roll": 0.1,
-        "Left_Knee_Pitch": 0.6,
-        "Left_Ankle_Pitch": -0.3,
-        "Left_Ankle_Roll": -0.1,
-        "Right_Hip_Pitch": -0.3,
-        "Right_Hip_Roll": -0.1,
-        "Right_Knee_Pitch": 0.6,
-        "Right_Ankle_Pitch": -0.3,
-        "Right_Ankle_Roll": 0.1,
-        ".*": 0.0,
-    },
+    joint_pos=dict(K1_DEFAULT_JOINT_POS),
     joint_vel={".*": 0.0},
 )
 
