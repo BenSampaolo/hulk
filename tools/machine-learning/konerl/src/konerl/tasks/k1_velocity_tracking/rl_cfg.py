@@ -5,6 +5,8 @@ from mjlab.rl import (
 )
 from dataclasses import dataclass, field
 
+from konerl.symmetry.k1_specs import k1_velocity_actor_model_kwargs, k1_velocity_critic_model_kwargs
+
 def k1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
     return RslRlOnPolicyRunnerCfg(
         actor=RslRlModelCfg(
@@ -47,3 +49,21 @@ def k1_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
         max_iterations=5_000,
         clip_actions=5.0
     )
+
+
+def k1_equivariant_ppo_runner_cfg() -> RslRlOnPolicyRunnerCfg:
+    """Opt-in runner config using the initial equivariant actor/critic port.
+
+    This is deliberately not used by the registered default tasks yet, so normal
+    velocity and AMP training remain unchanged. Use this only for explicit
+    symmetry experiments after validating the observation/action specs.
+    """
+    cfg = k1_ppo_runner_cfg()
+    actor_kwargs = k1_velocity_actor_model_kwargs()
+    cfg.actor.class_name = str(actor_kwargs["class_name"])
+    cfg.actor.activation = str(actor_kwargs["activation"])
+
+    critic_kwargs = k1_velocity_critic_model_kwargs()
+    cfg.critic.class_name = str(critic_kwargs["class_name"])
+    cfg.critic.activation = str(critic_kwargs["activation"])
+    return cfg
