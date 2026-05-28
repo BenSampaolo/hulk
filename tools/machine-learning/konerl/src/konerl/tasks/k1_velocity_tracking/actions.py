@@ -80,10 +80,10 @@ def make_actions_cfg() -> dict[str, ActionTermCfg]:
             scale=0.5,  # Override per-robot.
             use_default_offset=True,
         ),
-        "gait_frequency": GaitFrequencyActionCfg(
-            entity_name="robot",
-            offset_scale=0.8,
-        ),
+        # "gait_frequency": GaitFrequencyActionCfg(
+        #     entity_name="robot",
+        #     offset_scale=0.8,
+        # ),
     }
 
 
@@ -108,16 +108,16 @@ def make_commands_cfg() -> dict[str, CommandTermCfg]:
         "twist": KickCommandCfg(
             entity_name="robot",
             ball_name="ball",
-            resampling_time_range=(10.0, 15.0),
-            rel_standing_envs=0.3,
-            rel_walk_envs=0.7,
+            resampling_time_range=(5.0, 15.0),
+            rel_standing_envs=0.2,
+            rel_walk_envs=0.8,
             rel_kick_envs=0.0,
             rel_dribble_envs=0.0,
             debug_vis=True,
             ranges=KickCommandCfg.Ranges(
                 walking_lin_vel_x=(-1.0, 1.0),
                 walking_lin_vel_y=(-1.0, 1.0),
-                walking_ang_vel_z=(-1.5, 1.5),
+                walking_ang_vel_z=(-1.0, 1.0),
                 dribble_lin_vel_x=(-0.5, 0.5),
                 dribble_lin_vel_y=(-0.5, 0.5),
                 dribble_ang_vel_z=(-1.0, 1.0),

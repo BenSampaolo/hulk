@@ -10,7 +10,6 @@ from dataclasses import dataclass
 from mjlab.utils.noise.noise_cfg import NoiseCfg
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
-from .rewards import is_walking_env, is_kicking_env, is_standing_env, is_dribble_env
 
 _JOINT_VEL_EMA_ALPHA = 0.78
 
@@ -29,37 +28,6 @@ def quat_from_yaw(yaw: torch.Tensor) -> torch.Tensor:
     x = torch.zeros_like(yaw)
     y = torch.zeros_like(yaw)
     return torch.stack([w, x, y, z], dim=-1)
-
-def obs_gait_sin(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-) -> torch.Tensor:
-    """The sine of the current gait phase. Scaled by 0 if not walking/kicking."""
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-    command_cfg = env.command_manager.get_term(command_name)
-    assert command_cfg is not None
-    
-    gait_process = getattr(command_cfg, "gait_process")
-    vel_norms = torch.norm(command[:, :2], dim=-1)
-    active = (vel_norms >= 0.05).float()
-    return (torch.sin(2 * torch.pi * gait_process) * active).unsqueeze(-1)
-
-
-def obs_gait_cos(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-) -> torch.Tensor:
-    """The cosine of the current gait phase. Scaled by 0 if not walking/kicking."""
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-    command_cfg = env.command_manager.get_term(command_name)
-    assert command_cfg is not None
-    
-    gait_process = getattr(command_cfg, "gait_process")
-    vel_norms = torch.norm(command[:, :2], dim=-1)
-    active = (vel_norms >= 0.05).float()
-    return (torch.cos(2 * torch.pi * gait_process) * active).unsqueeze(-1)
 
 def _get_env_step_index(env: Any) -> int | None:
     for attr in ("common_step_counter", "global_step_counter", "step_counter"):
@@ -344,40 +312,6 @@ def safe_foot_contact_forces(env, sensor_name: str) -> torch.Tensor:
     obs = mdp.foot_contact_forces(env, sensor_name)
     return torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
 
-##
-# Gait
-##
-
-def obs_gait(env, _asset_cfg: SceneEntityCfg | None = None) -> torch.Tensor:
-    action_manager = getattr(env, "action_manager", None)
-    if action_manager is not None and hasattr(action_manager, "get_term"):
-        try:
-            freq_term = action_manager.get_term("gait_frequency")
-            current_phase = getattr(freq_term, "current_phase", None)
-            if isinstance(current_phase, torch.Tensor):
-                phase = current_phase.reshape(env.num_envs, -1)[:, 0]
-                gait_sin = torch.sin(phase)
-                gait_cos = torch.cos(phase)
-                return torch.stack((gait_sin, gait_cos), dim=-1).to(device=getattr(env, "device", "cpu"), dtype=torch.float32)
-        except Exception:
-            pass
-            
-    # Fallback if term doesn't exist (e.g. testing without it)
-    return torch.zeros((getattr(env, "num_envs", 1), 2), device=getattr(env, "device", "cpu"), dtype=torch.float32)
-
-def gait_frequency_multiplier(env, _asset_cfg: SceneEntityCfg | None = None) -> torch.Tensor:
-    action_manager = getattr(env, "action_manager", None)
-    if action_manager is not None and hasattr(action_manager, "get_term"):
-        try:
-            freq_term = action_manager.get_term("gait_frequency")
-            multiplier = getattr(freq_term, "freq_multiplier", None)
-            if isinstance(multiplier, torch.Tensor):
-                return multiplier.reshape(env.num_envs, -1)[:, 0:1]
-        except Exception:
-            pass
-    return torch.ones((getattr(env, "num_envs", 1), 1), device=getattr(env, "device", "cpu"), dtype=torch.float32)
-
-
 def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
     policy_terms = {
         "base_ang_vel": ObservationTermCfg(
@@ -405,31 +339,11 @@ def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
             delay_min_lag=1,
             delay_max_lag=2,
         ),
-        "ball_pos": ObservationTermCfg(
-            func=obs_ball_pos_heading_frame,
-            noise=ClippedGaussianNoiseCfg(mean=0, std=0.03, min=-0.1, max=0.1),
-            delay_min_lag=1,
-            delay_max_lag=2,
-        ),
-         "ball_vel": ObservationTermCfg(
-            func=obs_ball_vel_heading_frame,
-            noise=ClippedGaussianNoiseCfg(mean=0, std=0.03, min=-0.1, max=0.1),
-            delay_min_lag=1,
-            delay_max_lag=2,
-        ),
         "actions": ObservationTermCfg(
             func=mdp.last_action,
         ),
         "command": ObservationTermCfg(
             func=mdp.generated_commands,
-            params={"command_name": "twist"},
-        ),
-        "gait_sin": ObservationTermCfg(
-            func=obs_gait_sin,
-            params={"command_name": "twist"},
-        ),
-        "gait_cos": ObservationTermCfg(
-            func=obs_gait_cos,
             params={"command_name": "twist"},
         ),
     }
@@ -461,17 +375,6 @@ def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
             func=mdp.generated_commands,
             params={"command_name": "twist"},
         ),
-        "gait_sin": ObservationTermCfg(
-            func=obs_gait_sin,
-            params={"command_name": "twist"},
-        ),
-        "gait_cos": ObservationTermCfg(
-            func=obs_gait_cos,
-            params={"command_name": "twist"},
-        ),
-        # "gait_frequency": ObservationTermCfg(
-        #     func=gait_frequency_multiplier,
-        # ),
 
         ##
         # Exclusive critic terms
