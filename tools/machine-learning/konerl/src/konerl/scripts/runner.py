@@ -17,7 +17,15 @@ from mjlab.rl.vecenv_wrapper import RslRlVecEnvWrapper
 from mjlab.rl.runner import MjlabOnPolicyRunner
 from mjlab.tasks.velocity.rl import VelocityOnPolicyRunner
 
-from .AMP import AMPDiscriminator, AMPOptimizer, AMPConfig, MocapBuffer
+from .AMP import (
+    AMPDiscriminator,
+    AMPOptimizer,
+    AMPConfig,
+    MocapBuffer,
+    MOCAP_TO_K1,
+    amp_features_from_robot,
+    controlled_joint_names_from_env,
+)
 
 
 class SimpleAMPBuilder:
@@ -26,39 +34,10 @@ class SimpleAMPBuilder:
     Maps raw mocap dictionaries (e.g. from .pkl or .npy) to the AMP feature format
     dynamically based on the active actuators.
     """
-    MOCAP_TO_K1 = {
-        'Head1': 'AAHead_Yaw',
-        'Head2': 'Head_Pitch',
-        'Left_Arm_1': 'ALeft_Shoulder_Pitch',
-        'Right_Arm_1': 'ARight_Shoulder_Pitch',
-        'Left_Arm_2': 'Left_Shoulder_Roll',
-        'Right_Arm_2': 'Right_Shoulder_Roll',
-        'Left_Arm_3': 'Left_Elbow_Pitch',
-        'Right_Arm_3': 'Right_Elbow_Pitch',
-        'left_hand_link': 'Left_Elbow_Yaw', 
-        'right_hand_link': 'Right_Elbow_Yaw',
-        
-        'Left_Hip_Pitch': 'Left_Hip_Pitch',
-        'Right_Hip_Pitch': 'Right_Hip_Pitch',
-        'Left_Hip_Roll': 'Left_Hip_Roll',
-        'Right_Hip_Roll': 'Right_Hip_Roll',
-        'Left_Hip_Yaw': 'Left_Hip_Yaw',
-        'Right_Hip_Yaw': 'Right_Hip_Yaw',
-        
-        'Left_Shank': 'Left_Knee_Pitch',
-        'Right_Shank': 'Right_Knee_Pitch',
-        
-        'Left_Ankle_Cross': 'Left_Ankle_Pitch',
-        'Right_Ankle_Cross': 'Right_Ankle_Pitch',
-        
-        'left_foot_link': 'Left_Ankle_Roll',
-        'right_foot_link': 'Right_Ankle_Roll'
-    }
-
     def __init__(self, active_joints: list[str]):
         self.active_joints = active_joints
-        self.k1_to_mocap = {v: k for k, v in self.MOCAP_TO_K1.items()}
-        self.feature_dim = len(self.active_joints) * 2 # pos and vel
+        self.k1_to_mocap = {v: k for k, v in MOCAP_TO_K1.items()}
+        self.feature_dim = len(self.active_joints) * 2 + 6  # pos and vel + root vel and ang vel
 
     def build_from_mocap_dict(self, raw_data: dict) -> np.ndarray | None:
         assert 'link_body_list' in raw_data, "Mocap data missing 'link_body_list'"
@@ -76,9 +55,13 @@ class SimpleAMPBuilder:
 
         dof_pos = raw_data["dof_pos"]
         dof_vel = raw_data["dof_vel"]
+        root_vel = raw_data["root_vel"]
+        root_ang_vel = raw_data["root_ang_vel"]
 
-        features = np.concatenate([dof_pos[:, indices], dof_vel[:, indices]], axis=-1).astype(np.float32)
-        return features
+        return np.concatenate(
+            [dof_pos[:, indices], dof_vel[:, indices], root_vel, root_ang_vel],
+            axis=-1,
+        ).astype(np.float32)
 
 
 class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
@@ -96,18 +79,9 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
         device: str = "cpu",
     ) -> None:
         super().__init__(env, train_cfg, log_dir, device)
-        self.active_joints = []
-        if hasattr(self.env.cfg.scene.entities.get("robot", None), "articulation"):
-            articulation = self.env.cfg.scene.entities["robot"].articulation
-            assert articulation is not None, "Articulation not found in robot entity."
-            actuators = articulation.actuators
-            for act in actuators:
-                if hasattr(act, 'target_names_expr'):
-                    self.active_joints.extend(act.target_names_expr)
-                    
+        self.active_joints = list(controlled_joint_names_from_env(self.env))
         if not self.active_joints:
-            print("[AMP] Warning: No active joints found in env config. Falling back to default list.")
-            self.active_joints = list(SimpleAMPBuilder.MOCAP_TO_K1.values())
+            raise RuntimeError("AMP requires at least one controlled robot joint")
 
         builder = SimpleAMPBuilder(self.active_joints)
         self.amp_feature_dim = builder.feature_dim
@@ -115,33 +89,36 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
 
         self.dt = self.env.cfg.sim.mujoco.timestep if self.env.cfg.scale_rewards_by_dt else 1.0
 
-        self.amp_config = AMPConfig(
-            history_length=self.cfg.get("history_length", 20),
-            batch_size=self.cfg.get("amp_batch_size", 512),
-            weight_decay=self.cfg.get("amp_weight_decay", 1e-3),
-            gradient_penalty_weight=self.cfg.get("amp_gradient_penalty_weight", 5.0),
-            learning_rate=self.cfg.get("amp_learning_rate", 1e-5),
-        )
+        self.amp_config = AMPConfig()
 
         self.discriminator = AMPDiscriminator(
             input_dim=self.amp_feature_dim,
             history_length=self.amp_config.history_length,
-            hidden_dims=[128, 128],
+            hidden_dims=[256, 256],
         ).to(self.device)
 
-        amp_data_dir = Path(self.cfg.get("amp_data_dir", "motions/CMU/"))
+        amp_data_dir = Path(self.cfg.get("amp_data_dir", "motions/CMU_Certified_Speed"))
         
-        if amp_data_dir.exists() and any(amp_data_dir.glob("**/*.*")):
-            self.expert_buffer = MocapBuffer.load(amp_data_dir, builder, self.amp_config.history_length, self.device)
-        else:
-            print(f"[AMP] Warning: Mocap data directory '{amp_data_dir}' not found or empty. Creating a dummy expert buffer for functional testing.")
-            dummy_obs = torch.zeros((1000, self.amp_feature_dim), device=self.device)
-            dummy_idx = torch.arange(1000 - self.amp_config.history_length + 1, device=self.device)
-            self.expert_buffer = MocapBuffer(dummy_obs, dummy_idx, self.amp_config.history_length, self.device)
+        if not amp_data_dir.exists() or not any(amp_data_dir.glob("**/*.*")):
+            raise FileNotFoundError(f"AMP mocap data directory '{amp_data_dir}' not found or empty")
+        self.expert_buffer = MocapBuffer.load(amp_data_dir, builder, self.amp_config.history_length, self.device)
 
         self.amp_optimizer = AMPOptimizer(self.amp_config, self.device, self.expert_buffer, self.discriminator)
+
+        setattr(self.env.unwrapped, "amp_optimizer", self.amp_optimizer)
         
         self.amp_history = torch.zeros((self.num_envs, self.amp_config.history_length, self.amp_feature_dim), device=self.device)
+
+    def _broadcast_amp_state(self) -> None:
+        if not self.is_distributed:
+            return
+        amp_state = [
+            self.discriminator.state_dict(),
+            self.amp_optimizer.optimizer.state_dict(),
+        ]
+        torch.distributed.broadcast_object_list(amp_state, src=0)
+        self.discriminator.load_state_dict(amp_state[0])
+        self.amp_optimizer.optimizer.load_state_dict(amp_state[1])
 
     def _compute_amp_features(self, env: RslRlVecEnvWrapper, obs: torch.Tensor) -> torch.Tensor:
         """
@@ -149,22 +126,33 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
         Map the current state (from 'obs' or 'env.unwrapped') to the AMP feature space.
         """
         robot = env.unwrapped.scene["robot"]
+        return amp_features_from_robot(robot, self.active_joints, self.device)
 
-        joint_names = robot.joint_names
-        joint_indices = []
-        for name in self.active_joints:
-            try:
-                idx = joint_names.index(name)
-                joint_indices.append(idx)
-            except ValueError:
-                joint_indices.append(0) 
+    def save(self, path: str, infos=None) -> None:
+        amp_state = {
+            "discriminator": self.discriminator.state_dict(),
+            "optimizer": self.amp_optimizer.optimizer.state_dict(),
+            "normalizer": self.discriminator.normalizer.state_dict(),
+            "config": self.amp_config,
+        }
+        infos = {**(infos or {}), "amp_state": amp_state}
+        super().save(path, infos=infos)
 
-        jnt_ids = torch.tensor(joint_indices, device=self.device, dtype=torch.long)
-        
-        j_pos = robot.data.joint_pos[:, jnt_ids]  # [num_envs, num_active_joints]
-        j_vel = robot.data.joint_vel[:, jnt_ids]  # [num_envs, num_active_joints]
-        
-        return torch.cat([j_pos, j_vel], dim=-1)
+    def load(
+        self,
+        path: str,
+        load_cfg: dict | None = None,
+        strict: bool = True,
+        map_location: str | None = None,
+    ) -> dict:
+        infos = super().load(path, load_cfg=load_cfg, strict=strict, map_location=map_location)
+        amp_state = infos.get("amp_state") if infos else None
+        if amp_state is not None:
+            self.discriminator.load_state_dict(amp_state["discriminator"], strict=strict)
+            self.amp_optimizer.optimizer.load_state_dict(amp_state["optimizer"])
+            if "normalizer" in amp_state:
+                self.discriminator.normalizer.load_state_dict(amp_state["normalizer"], strict=strict)
+        return infos
 
     def learn(self, num_learning_iterations: int, init_at_random_ep_len: bool = False) -> None:
         """Run the learning loop for the specified number of iterations."""
@@ -179,6 +167,7 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
         if self.is_distributed:
             print(f"Synchronizing parameters for rank {self.gpu_global_rank}...")
             self.alg.broadcast_parameters()
+            self._broadcast_amp_state()
 
         self.logger.init_logging_writer()
 
@@ -187,8 +176,7 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
         for it in range(start_it, total_it):
             start = time.time()
             amp_rollout_data = []
-            
-            # Rollout
+
             with torch.inference_mode():
                 for _ in range(self.cfg["num_steps_per_env"]):
                     actions = self.alg.act(obs)
@@ -204,10 +192,6 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
                     reset_env_ids = dones.nonzero(as_tuple=False).squeeze(-1)
                     if len(reset_env_ids) > 0:
                         self.amp_history[reset_env_ids] = amp_features[reset_env_ids].unsqueeze(1).expand(-1, self.amp_config.history_length, -1)
-
-                    amp_reward = self.amp_optimizer.calculate_amp_rewards(self.amp_history).squeeze(-1)
-                    amp_reward_weight = self.cfg.get("amp_reward_weight", 4.0)
-                    rewards = rewards + (amp_reward_weight * amp_reward * self.dt)
                     
                     amp_rollout_data.append(self.amp_history.clone())
 
@@ -224,8 +208,11 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
             loss_dict = self.alg.update()
 
             amp_obs_batch = torch.cat(amp_rollout_data, dim=0) # [num_steps * num_envs, H, D]
-            amp_metrics = self.amp_optimizer.train_step(amp_obs_batch)
-            loss_dict.update(amp_metrics)
+            if not self.is_distributed or self.gpu_global_rank == 0:
+                amp_metrics = self.amp_optimizer.train_step(amp_obs_batch)
+                amp_metrics["amp/steps_skipped"] = self.amp_optimizer.skip_counter
+                loss_dict.update(amp_metrics)
+            self._broadcast_amp_state()
 
             stop = time.time()
             learn_time = stop - start

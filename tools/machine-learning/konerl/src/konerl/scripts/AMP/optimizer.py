@@ -39,15 +39,15 @@ class DiscriminatorReplayBuffer:
 
 @dataclasses.dataclass
 class AMPConfig:
-    learning_rate: float = 1e-4
+    learning_rate: float = 1.0e-4
     weight_decay: float = 1e-3
     replay_buffer_size: int = 1000000
     history_length: int = 5
-    batch_size: int = 1024
-    gradient_penalty_weight: float = 10.0
+    batch_size: int = 512
+    gradient_penalty_weight: float = 1.0
     update_interval: int = 1
     instance_noise_std: float = 0.0
-    target_accuracy: float = 0.9
+    target_accuracy: float = 1.0
 
 
 class AMPOptimizer:
@@ -85,6 +85,8 @@ class AMPOptimizer:
 
         self._initialize_normalizer()
 
+        self.skip_counter = 0
+
     def _initialize_normalizer(self) -> None:
         """
         Computes mean and variance from the expert buffer and freezes the discriminator's normalizer.
@@ -98,7 +100,7 @@ class AMPOptimizer:
         flat_expert_batch = expert_batch.view(n_samples, -1)
 
         mean = torch.mean(flat_expert_batch, dim=0).double()
-        var = torch.var(flat_expert_batch, dim=0).double()
+        var = torch.var(flat_expert_batch, dim=0, unbiased=False).double()
 
         self.discriminator.normalizer.running_mean.data.copy_(mean)
         self.discriminator.normalizer.running_var.data.copy_(var)
@@ -112,14 +114,21 @@ class AMPOptimizer:
         Computes AMP reward for given AMP observations.
         The discriminator logits are +1 when the observation is classified as expert-like.
         """
+        was_training = self.discriminator.training
+        self.discriminator.eval()
         d_logits = self.discriminator(amp_observations)
-        # LSGAN Reward: Maximize D(s) -> 1
-        return torch.maximum(torch.zeros_like(d_logits), 1.0 - 0.25 * torch.square(d_logits - 1))
+        if was_training:
+            self.discriminator.train()
+        # D is trained to output +1 for expert and -1 for policy samples.
+        # The old LSGAN reward gave an undecided fake sample (D=0) a high 0.75 reward,
+        # so the policy could keep getting AMP reward while the discriminator still won.
+        return torch.clamp(0.5 * (d_logits + 1.0), min=0.0, max=1.0)
 
     def train_step(self, amp_obs: torch.Tensor) -> dict[str, float]:
         """
         amp_obs: expected to be collected history from rollout of shape [N, H, D]
         """
+        self.discriminator.train()
         self.step_count += 1
         if self.step_count % self.config.update_interval != 0:
             return {}
@@ -132,14 +141,8 @@ class AMPOptimizer:
 
         iterations = int(amp_obs.shape[0] / self.config.batch_size)
         iterations = max(1, min(iterations, 10))
-        
-        skip_updates = False
 
-        for _ in range(iterations):
-            if skip_updates:
-                print(f"[AMP] Skipping discriminator update")
-                break
-                
+        for _ in range(iterations):              
             fake_batch = self.replay_buffer.sample(self.config.batch_size)
             real_batch = self.expert_buffer.sample(self.config.batch_size)
 
@@ -151,20 +154,21 @@ class AMPOptimizer:
             acc_real = (real_logits > 0.0).float().mean().item()
             acc_fake = (fake_logits < 0.0).float().mean().item()
             
-            if acc_fake > self.config.target_accuracy:
-                skip_updates = True
+            # if acc_fake >= self.config.target_accuracy:
+            #     print(f"[AMP] Skipping discriminator update due to high fake accuracy ({acc_fake:.2f} >= {self.config.target_accuracy:.2f}).")
+            #     self.skip_counter += 1
                 
-                self.metrics["amp/loss"].append(0.0)
-                self.metrics["amp/logits_real"].append(real_logits.mean().item())
-                self.metrics["amp/logits_fake"].append(fake_logits.mean().item())
-                self.metrics["amp/grad_penalty"].append(0.0)
-                self.metrics["amp/accuracy_real"].append(acc_real)
-                self.metrics["amp/accuracy_fake"].append(acc_fake)
-                continue
+            #     self.metrics["amp/loss"].append(0.0)
+            #     self.metrics["amp/logits_real"].append(real_logits.mean().item())
+            #     self.metrics["amp/logits_fake"].append(fake_logits.mean().item())
+            #     self.metrics["amp/grad_penalty"].append(0.0)
+            #     self.metrics["amp/accuracy_real"].append(acc_real)
+            #     self.metrics["amp/accuracy_fake"].append(acc_fake)
+            #     break
 
             loss_real = torch.mean(torch.square(real_logits - 1))
             loss_fake = torch.mean(torch.square(fake_logits + 1))
-            loss = (loss_real + loss_fake) * 0.5
+            loss = (loss_real + loss_fake) / 2
 
             real_batch.requires_grad_(True)
             d_real = self.discriminator(real_batch)

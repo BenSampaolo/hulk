@@ -5,8 +5,8 @@ from mjlab.managers.event_manager import EventTermCfg
 from .simulation import make_velocity_env_cfg
 
 
-def k1_rough_env_cfg(*, play: bool = False) -> ManagerBasedRlEnvCfg:
-    cfg = make_velocity_env_cfg(play)
+def k1_rough_env_cfg(*, play: bool = False, amp: bool = False) -> ManagerBasedRlEnvCfg:
+    cfg = make_velocity_env_cfg(play, amp=amp)
     if play:
         cfg.episode_length_s = int(1e9)
 

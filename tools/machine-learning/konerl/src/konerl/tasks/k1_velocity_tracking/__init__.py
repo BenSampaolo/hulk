@@ -15,7 +15,7 @@ register_mjlab_task(
 
 register_mjlab_task(
     task_id="Mjlab-Velocity-Rough-K1-AMP",
-    env_cfg=k1_rough_env_cfg(),
+    env_cfg=k1_rough_env_cfg(amp=True),
     play_env_cfg=k1_rough_env_cfg(play=True),
     rl_cfg=k1_ppo_runner_cfg(),
     runner_cls=MjlabAMPOnPolicyRunner,

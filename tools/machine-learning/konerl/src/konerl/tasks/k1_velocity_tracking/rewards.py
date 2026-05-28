@@ -13,6 +13,9 @@ from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
 from mjlab.tasks.velocity import mdp
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
 
+from konerl.scripts.AMP.optimizer import AMPOptimizer
+from konerl.scripts.AMP.features import K1_AMP_JOINT_NAMES, amp_features_from_robot
+
 def get_yaw_from_quaternion(quat: torch.Tensor) -> torch.Tensor:
     """Extract yaw from a quaternion [w, x, y, z]."""
     w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
@@ -547,55 +550,50 @@ def soft_landing(
       cost = cost * active
   return cost
 
-def feet_swing(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    swing_period: float = 0.5,
-    sensor_name: str = "feet_ground_contact",
-) -> torch.Tensor:
-    """Rewards lifting the foot when the gait phase indicates it should be swinging."""
-    command = env.command_manager.get_command(command_name)
-    command_cfg = env.command_manager.get_term(command_name)
-    assert command is not None
-    assert command_cfg is not None
+class amp_reward:
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        self.env = env
+        self.cfg = cfg
 
-    gait_process = getattr(command_cfg, "gait_process")
-    gait_frequency = getattr(command_cfg, "gait_frequency")
+        self.amp_optimizer: AMPOptimizer | None = getattr(env, "amp_optimizer", None)
 
-    contact_sensor = env.scene.sensors[sensor_name]
-    assert contact_sensor is not None
-    feet_contact = contact_sensor.data.found < 0.5
-    
-    vel_norms = torch.norm(command[:, :2], dim=-1)
-    is_active = (vel_norms >= 0.05) & (gait_frequency > 1.0e-8)
+        joint_names = tuple(cfg.params["asset_cfg"].joint_names or ())
+        if not joint_names:
+            raise ValueError("AMP reward requires explicit asset_cfg.joint_names")
+        self.amp_feature_dim = len(joint_names) * 2 + 6  # joint pos, joint vel, root lin vel, root ang vel
 
-    # Copied from Booster_Gym's foot swing reward
-    left_swing = (torch.abs(gait_process - 0.25) < 0.5 * swing_period) & is_active
-    right_swing = (torch.abs(gait_process - 0.75) < 0.5 * swing_period) & is_active
-    reward = (left_swing & ~feet_contact[:, 0]).float() + (right_swing & ~feet_contact[:, 1]).float()
-    return reward
+        self.amp_history = torch.zeros((self.env.num_envs, cfg.params["history_length"], self.amp_feature_dim), device=self.env.device)
 
-def action_gait_freq_penalty(
-    env: ManagerBasedRlEnv,
-) -> torch.Tensor:
-    """Penalizes the agent for using the gait frequency offset action."""
-    if "gait_frequency" not in env.action_manager.active_terms:
-        return torch.zeros(env.num_envs, device=env.device)
+
+    def __call__(self, env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, history_length: int) -> torch.Tensor:
+        if not hasattr(env, "amp_optimizer"):
+            raise RuntimeError("AMP reward is configured but env.amp_optimizer is missing")
+        if self.amp_optimizer is None:
+            self.amp_optimizer = getattr(env, "amp_optimizer")
         
-    gait_action = env.action_manager.get_term("gait_frequency")
-    freq_offset = getattr(gait_action, "freq_offset").squeeze(-1)
-    
-    return torch.square(freq_offset)
+        assert self.amp_optimizer is not None, "AMP optimizer is not set in the environment"
 
-def make_reward_cfg() -> dict[str, RewardTermCfg]:
-    return {
-        "survival": RewardTermCfg(
-            func=mdp.is_alive,
-            weight=0.25,
-        ),
+        robot: Entity = env.scene[asset_cfg.name]
+        joint_names = tuple(asset_cfg.joint_names or ())
+        current_features = amp_features_from_robot(robot, joint_names, env.device)
+
+        self.amp_history = torch.roll(self.amp_history, shifts=-1, dims=1)
+        self.amp_history[:, -1, :] = current_features
+
+        return self.amp_optimizer.calculate_amp_rewards(self.amp_history).squeeze(-1)
+    
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            self.amp_history.fill_(0.0)
+        else:
+            self.amp_history[env_ids] = 0.0
+        
+
+def make_reward_cfg(*, amp: bool = False) -> dict[str, RewardTermCfg]:
+    rewards = {
         "upright": RewardTermCfg(
             func=mdp.upright,
-            weight=1.0,
+            weight=0.2,
             params={
                 "std": 0.5,
                 "asset_cfg": SceneEntityCfg("robot", body_names="Trunk"),
@@ -603,42 +601,38 @@ def make_reward_cfg() -> dict[str, RewardTermCfg]:
         ),
         "termination": RewardTermCfg(
             func=mdp.is_terminated,
-            weight=-150.0,
+            weight=-200.0,
         ),
         "target_base_height": RewardTermCfg(
             func=TargetBaseHeightMean,
-            weight=0.6,
+            weight=0.2,
             params={
-                "target_height": 0.5,
+                "target_height": 0.55,
                 "ema_alpha": 0.1,
                 "std": math.sqrt(0.3),
             },
         ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
-        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.15),
-        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-0.15),
-        "action_jerk_l2": RewardTermCfg(func=ActionJerkL2, weight=-0.05),
-        "joint_vel_l2": RewardTermCfg(func=mdp.joint_vel_l2, weight=-0.002),
-        "torque_l2": RewardTermCfg(func=mdp.joint_torques_l2, weight=-0.0003),
-        "body_ang_vel": RewardTermCfg(
-            func=mdp.body_angular_velocity_penalty,
-            weight=-0.001,
-            params={
-                "asset_cfg": SceneEntityCfg("robot", body_names="Trunk")
-            },  
-        ),
-        "soft_landing": RewardTermCfg(
-            func=soft_landing,
-            weight=-0.001,
-            params={
-                "sensor_name": "feet_ground_contact",
-                "command_name": "twist",
-                "command_threshold": 0.05,
-            },
-        ),
+        # "electrical_power_cost": RewardTermCfg(
+        #     func=mdp.electrical_power_cost, 
+        #     weight=-0.003,
+        #     params={
+        #         "asset_cfg": SceneEntityCfg("robot", joint_names=(
+        #             "Left_Hip_Pitch", "Right_Hip_Pitch", 
+        #             "Left_Hip_Roll", "Right_Hip_Roll", 
+        #             "Left_Hip_Yaw", "Right_Hip_Yaw", 
+        #             "Left_Knee_Pitch", "Right_Knee_Pitch", 
+        #             "Left_Ankle_Pitch", "Right_Ankle_Pitch", 
+        #             "Left_Ankle_Roll", "Right_Ankle_Roll"
+        #         )),
+        #     },
+        # ),
+        "action_rate_l2": RewardTermCfg(func=mdp.action_rate_l2, weight=-0.01),
+        "action_acc_l2": RewardTermCfg(func=mdp.action_acc_l2, weight=-0.005),
+        "torque_l2": RewardTermCfg(func=mdp.joint_torques_l2, weight=-1.0e-5),
         "velocity_tracking": RewardTermCfg(
             func=TrackLinearVelocityMean,
-            weight=2.0,
+            weight=1.0,
             params={
                 "command_name": "twist",
                 "std": math.sqrt(0.4),
@@ -647,71 +641,64 @@ def make_reward_cfg() -> dict[str, RewardTermCfg]:
         ),
         "velocity_tracking_ang": RewardTermCfg(
             func=TrackAngularVelocityMean,
-            weight=2.0,
+            weight=1.0,
             params={
                 "command_name": "twist",
                 "std": math.sqrt(0.4),
                 "ema_alpha": 0.2,
             },
         ),
-        "kick_contact": RewardTermCfg(
-            func=kick_contact_reward,
-            weight=50.0,
+        "air_time": RewardTermCfg(
+            func=mdp.feet_air_time,
+            weight=0.4,
             params={
-                "command_name": "twist",
-                "sensor_name": "robot_ball_collision",
-            }
-        ),
-        "kick_velocity": RewardTermCfg(
-            func=KickVelocityReward,
-            weight=50.0,
-            params={
-                "command_name": "twist",
-                "ball_cfg": SceneEntityCfg("ball"),
-                "std": 5.0,
-            }
-        ),
-        "ball_distance": RewardTermCfg(
-            func=distance_to_ball_reward,
-            weight=1.0,
-            params={
-                "robot_cfg": SceneEntityCfg("robot"),
-                "ball_cfg": SceneEntityCfg("ball"),
-                "target_distance": 0.4,
-                "std": 0.25,
-            }
-        ),
-        "ball_dribble": RewardTermCfg(
-            func=ball_dribble_position,
-            weight=3.0,
-            params={
-                "robot_cfg": SceneEntityCfg("robot"),
-                "ball_cfg": SceneEntityCfg("ball"),
-                "target_distance": 0.4,
-                "std": 1.0,
-                "in_range_dist": 1.0,
-            }
-        ),
-        "ball_approach": RewardTermCfg(
-            func=ball_approach_alignment,
-            weight=2.0,
-            params={
-                "command_name": "twist",
-                "robot_cfg": SceneEntityCfg("robot"),
-                "ball_cfg": SceneEntityCfg("ball"),
-            }
-        ),
-        "feet_swing": RewardTermCfg(
-            func=feet_swing,
-            weight=1.0,
-            params={
-                "command_name": "twist",
-                "swing_period": 0.5,
                 "sensor_name": "feet_ground_contact",
-            }
+                "threshold_min": 0.05,
+                "threshold_max": 0.45,
+                "command_name": "twist",
+                "command_threshold": 0.05,
+            },
         ),
-        "gait_freq_penalty": RewardTermCfg(
-            func=action_gait_freq_penalty,
-            weight=-0.5,
+        "foot_swing_height": RewardTermCfg(
+            func=mdp.feet_swing_height,
+            weight=-0.25,
+            params={
+                "sensor_name": "feet_ground_contact",
+                "height_sensor_name": "foot_height_scan",
+                "target_height": 0.08,
+                "command_name": "twist",
+                "command_threshold": 0.05,
+            },
+        ),
+        "foot_slip": RewardTermCfg(
+            func=mdp.feet_slip,
+            weight=-0.05,
+            params={
+                "sensor_name": "feet_ground_contact",
+                "command_name": "twist",
+                "command_threshold": 0.05,
+                "asset_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+            },
+        ),
+        "soft_landing": RewardTermCfg(
+            func=mdp.soft_landing,
+            weight=-1e-5,
+            params={
+                "sensor_name": "feet_ground_contact",
+                "command_name": "twist",
+                "command_threshold": 0.05,
+            },
         ),
     }
+
+    if amp:
+        rewards["amp"] = RewardTermCfg(
+            func=amp_reward,
+            weight=2.0,
+            params={
+                "asset_cfg": SceneEntityCfg("robot", joint_names=K1_AMP_JOINT_NAMES),
+                "history_length": 5,
+            },
+        )
+
+    return rewards

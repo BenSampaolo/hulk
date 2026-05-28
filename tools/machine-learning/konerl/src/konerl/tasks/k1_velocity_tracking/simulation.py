@@ -71,7 +71,7 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"]) -> SceneCfg:
         name="feet_ground_contact",
         primary=ContactMatch(
             mode="subtree",
-            pattern=("Right_Ankle_Cross", "Left_Ankle_Cross"),
+            pattern=("Left_Ankle_Cross", "Right_Ankle_Cross"),
             entity="robot",
         ),
         secondary=ContactMatch(
@@ -130,18 +130,18 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"]) -> SceneCfg:
     )
 
 
-def make_velocity_env_cfg(play: bool) -> ManagerBasedRlEnvCfg:
+def make_velocity_env_cfg(play: bool, *, amp: bool = False) -> ManagerBasedRlEnvCfg:
     if play:
-        terrain_type = "bumpy"
+        terrain_type = "flat"
     else:
-        terrain_type = "flat" # Back to bumpy baby
+        terrain_type = "flat"
     return ManagerBasedRlEnvCfg(
         scene=make_scene_cfg(terrain_type),
         observations=make_observation_cfg(),
         actions=make_actions_cfg(),
         commands=make_commands_cfg(),
         events=make_events_cfg(),
-        rewards=make_reward_cfg(),
+        rewards=make_reward_cfg(amp=amp),
         terminations=make_termination_cfg(),
         curriculum=make_curriculum_cfg(terrain_type),
         metrics=make_metric_cfg(),

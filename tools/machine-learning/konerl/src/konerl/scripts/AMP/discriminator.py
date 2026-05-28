@@ -23,7 +23,7 @@ class AMPDiscriminator(nn.Module):
         for hidden_dim in hidden_dims:
             layers.append(nn.utils.spectral_norm(nn.Linear(curr_dim, hidden_dim)))
             layers.append(nn.ReLU(inplace=True))
-            layers.append(nn.Dropout(p=0.1))
+            # layers.append(nn.Dropout(p=0.1))
             curr_dim = hidden_dim
 
         layers.append(nn.Linear(curr_dim, 1))
