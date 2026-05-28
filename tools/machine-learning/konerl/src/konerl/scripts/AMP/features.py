@@ -6,8 +6,8 @@ from typing import Any
 import torch
 
 # Keep the AMP feature joint order identical for expert mocap, policy rollouts,
-# and reward computation. This is the robot's joint order for the controlled legs.
-K1_AMP_JOINT_NAMES: tuple[str, ...] = (
+# and reward computation.
+K1_AMP_LEG_JOINT_NAMES: tuple[str, ...] = (
     "Left_Hip_Pitch",
     "Left_Hip_Roll",
     "Left_Hip_Yaw",
@@ -21,6 +21,22 @@ K1_AMP_JOINT_NAMES: tuple[str, ...] = (
     "Right_Ankle_Pitch",
     "Right_Ankle_Roll",
 )
+
+K1_AMP_ARM_JOINT_NAMES: tuple[str, ...] = (
+    "ALeft_Shoulder_Pitch",
+    "Left_Shoulder_Roll",
+    "Left_Elbow_Pitch",
+    "Left_Elbow_Yaw",
+    "ARight_Shoulder_Pitch",
+    "Right_Shoulder_Roll",
+    "Right_Elbow_Pitch",
+    "Right_Elbow_Yaw",
+)
+
+K1_AMP_FULL_BODY_JOINT_NAMES: tuple[str, ...] = K1_AMP_ARM_JOINT_NAMES + K1_AMP_LEG_JOINT_NAMES
+
+# Backward-compatible default for leg-only AMP runs.
+K1_AMP_JOINT_NAMES: tuple[str, ...] = K1_AMP_LEG_JOINT_NAMES
 
 MOCAP_TO_K1: dict[str, str] = {
     "Head1": "AAHead_yaw",

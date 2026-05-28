@@ -183,7 +183,7 @@ ANKLE_ROLL = BuiltinPositionActuatorCfg(
     delay_max_lag=2,
 )
 
-K1_ARTICULATION = EntityArticulationInfoCfg(
+K1_LEG_ARTICULATION = EntityArticulationInfoCfg(
     actuators=(
         HIP_PITCH,
         HIP_ROLL,
@@ -195,13 +195,32 @@ K1_ARTICULATION = EntityArticulationInfoCfg(
     soft_joint_pos_limit_factor=0.9,
 )
 
+K1_FULL_BODY_ARTICULATION = EntityArticulationInfoCfg(
+    actuators=(
+        SHOULDER_PITCH,
+        SHOULDER_ROLL,
+        ELBOW_PITCH,
+        ELBOW_YAW,
+        HIP_PITCH,
+        HIP_ROLL,
+        HIP_YAW,
+        KNEE_PITCH,
+        ANKLE_PITCH,
+        ANKLE_ROLL,
+    ),
+    soft_joint_pos_limit_factor=0.9,
+)
 
-def get_k1_robot_cfg() -> EntityCfg:
+# Backward-compatible alias for existing leg-only code.
+K1_ARTICULATION = K1_LEG_ARTICULATION
+
+
+def get_k1_robot_cfg(*, control_arms: bool = False) -> EntityCfg:
     return EntityCfg(
         init_state=ZERO_POSE,
         collisions=(FULL_COLLISION,),
         spec_fn=get_spec,
-        articulation=K1_ARTICULATION,
+        articulation=K1_FULL_BODY_ARTICULATION if control_arms else K1_LEG_ARTICULATION,
     )
 
 

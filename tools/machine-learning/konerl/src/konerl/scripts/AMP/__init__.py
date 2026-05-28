@@ -4,7 +4,10 @@ from .optimizer import AMPOptimizer, AMPConfig
 from .mocap_buffer import MocapBuffer
 from .cache import AMPStateCache
 from .features import (
+    K1_AMP_ARM_JOINT_NAMES,
+    K1_AMP_FULL_BODY_JOINT_NAMES,
     K1_AMP_JOINT_NAMES,
+    K1_AMP_LEG_JOINT_NAMES,
     MOCAP_TO_K1,
     amp_features_from_robot,
     amp_features_from_robot_indices,
@@ -20,7 +23,10 @@ __all__ = [
     "AMPConfig",
     "AMPStateCache",
     "MocapBuffer",
+    "K1_AMP_ARM_JOINT_NAMES",
+    "K1_AMP_FULL_BODY_JOINT_NAMES",
     "K1_AMP_JOINT_NAMES",
+    "K1_AMP_LEG_JOINT_NAMES",
     "MOCAP_TO_K1",
     "amp_features_from_robot",
     "amp_features_from_robot_indices",

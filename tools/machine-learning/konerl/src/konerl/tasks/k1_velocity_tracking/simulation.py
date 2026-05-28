@@ -19,6 +19,7 @@ from mjlab.sensor import (
 
 from konerl.k1_config import get_k1_robot_cfg
 from konerl.ball_config import get_ball_cfg
+from konerl.scripts.AMP.features import K1_AMP_FULL_BODY_JOINT_NAMES, K1_AMP_JOINT_NAMES
 
 from .actions import make_actions_cfg, make_commands_cfg
 from .curriculum import make_curriculum_cfg
@@ -45,7 +46,7 @@ BUMPY_TERRAINS_CFG = TerrainGeneratorCfg(
   add_lights=True,
 )
 
-def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"]) -> SceneCfg:
+def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"], *, control_arms: bool = False) -> SceneCfg:
     if terrain_type == "flat":
         terrain_cfg = TerrainEntityCfg()
     elif terrain_type == "rough":
@@ -122,7 +123,7 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"]) -> SceneCfg:
         terrain=terrain_cfg,
         sensors=(feet_ground_cfg, self_collision_cfg, foot_height_scan_cfg, robot_ball_collision_cfg),
         entities={
-            "robot": get_k1_robot_cfg(),
+            "robot": get_k1_robot_cfg(control_arms=control_arms),
             "ball": get_ball_cfg(),
         },
         num_envs=1,
@@ -130,18 +131,21 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"]) -> SceneCfg:
     )
 
 
-def make_velocity_env_cfg(play: bool, *, amp: bool = False) -> ManagerBasedRlEnvCfg:
+def make_velocity_env_cfg(play: bool, *, amp: bool = False, control_arms: bool = False) -> ManagerBasedRlEnvCfg:
     if play:
         terrain_type = "flat"
     else:
         terrain_type = "flat"
     return ManagerBasedRlEnvCfg(
-        scene=make_scene_cfg(terrain_type),
+        scene=make_scene_cfg(terrain_type, control_arms=control_arms),
         observations=make_observation_cfg(),
         actions=make_actions_cfg(),
         commands=make_commands_cfg(),
         events=make_events_cfg(),
-        rewards=make_reward_cfg(amp=amp),
+        rewards=make_reward_cfg(
+            amp=amp,
+            amp_joint_names=K1_AMP_FULL_BODY_JOINT_NAMES if control_arms else K1_AMP_JOINT_NAMES,
+        ),
         terminations=make_termination_cfg(),
         curriculum=make_curriculum_cfg(terrain_type),
         metrics=make_metric_cfg(),

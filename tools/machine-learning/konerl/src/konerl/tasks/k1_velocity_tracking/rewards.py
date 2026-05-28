@@ -611,7 +611,7 @@ class amp_reward:
             cache.reset(env_ids)
         
 
-def make_reward_cfg(*, amp: bool = False) -> dict[str, RewardTermCfg]:
+def make_reward_cfg(*, amp: bool = False, amp_joint_names: tuple[str, ...] = K1_AMP_JOINT_NAMES) -> dict[str, RewardTermCfg]:
     rewards = {
         "upright": RewardTermCfg(
             func=mdp.upright,
@@ -723,7 +723,7 @@ def make_reward_cfg(*, amp: bool = False) -> dict[str, RewardTermCfg]:
             func=amp_reward,
             weight=2.0,
             params={
-                "asset_cfg": SceneEntityCfg("robot", joint_names=K1_AMP_JOINT_NAMES),
+                "asset_cfg": SceneEntityCfg("robot", joint_names=amp_joint_names),
                 "history_length": 5,
             },
         )

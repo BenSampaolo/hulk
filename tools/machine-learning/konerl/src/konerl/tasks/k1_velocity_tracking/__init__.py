@@ -20,3 +20,11 @@ register_mjlab_task(
     rl_cfg=k1_ppo_runner_cfg(),
     runner_cls=MjlabAMPOnPolicyRunner,
 )
+
+register_mjlab_task(
+    task_id="Mjlab-Velocity-Rough-K1-AMP-Arms",
+    env_cfg=k1_rough_env_cfg(amp=True, control_arms=True),
+    play_env_cfg=k1_rough_env_cfg(play=True, control_arms=True),
+    rl_cfg=k1_ppo_runner_cfg(),
+    runner_cls=MjlabAMPOnPolicyRunner,
+)
