@@ -23,8 +23,10 @@ from .AMP import (
     AMPConfig,
     MocapBuffer,
     MOCAP_TO_K1,
-    amp_features_from_robot,
+    amp_features_from_robot_indices,
     controlled_joint_names_from_env,
+    joint_indices,
+    update_amp_history_,
 )
 
 
@@ -106,8 +108,14 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
         self.amp_optimizer = AMPOptimizer(self.amp_config, self.device, self.expert_buffer, self.discriminator)
 
         setattr(self.env.unwrapped, "amp_optimizer", self.amp_optimizer)
-        
+
+        self.robot = self.env.unwrapped.scene["robot"]
+        self.amp_joint_ids = joint_indices(self.robot, self.active_joints, self.device)
+        self.amp_features = torch.empty((self.num_envs, self.amp_feature_dim), device=self.device)
         self.amp_history = torch.zeros((self.num_envs, self.amp_config.history_length, self.amp_feature_dim), device=self.device)
+        self.amp_history_shift = torch.empty(
+            (self.num_envs, max(self.amp_config.history_length - 1, 0), self.amp_feature_dim), device=self.device
+        )
 
     def _broadcast_amp_state(self) -> None:
         if not self.is_distributed:
@@ -125,8 +133,8 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
         Helper to compute AMP features directly in the learning loop.
         Map the current state (from 'obs' or 'env.unwrapped') to the AMP feature space.
         """
-        robot = env.unwrapped.scene["robot"]
-        return amp_features_from_robot(robot, self.active_joints, self.device)
+        del env, obs
+        return amp_features_from_robot_indices(self.robot, self.amp_joint_ids, self.amp_features)
 
     def save(self, path: str, infos=None) -> None:
         amp_state = {
@@ -173,12 +181,17 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
 
         start_it = self.current_learning_iteration
         total_it = start_it + num_learning_iterations
+        rollout_steps = self.cfg["num_steps_per_env"]
+        amp_rollout_data = torch.empty(
+            (rollout_steps, self.num_envs, self.amp_config.history_length, self.amp_feature_dim), device=self.device
+        )
+
         for it in range(start_it, total_it):
             start = time.time()
-            amp_rollout_data = []
+            self.discriminator.eval()
 
             with torch.inference_mode():
-                for _ in range(self.cfg["num_steps_per_env"]):
+                for step_idx in range(rollout_steps):
                     actions = self.alg.act(obs)
                     obs, rewards, dones, extras = self.env.step(actions.to(self.env.device))
                     if self.cfg.get("check_for_nan", True):
@@ -186,14 +199,13 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
                     obs, rewards, dones = (obs.to(self.device), rewards.to(self.device), dones.to(self.device))
                     
                     amp_features = self._compute_amp_features(self.env, obs)
-                    self.amp_history = torch.roll(self.amp_history, shifts=-1, dims=1)
-                    self.amp_history[:, -1, :] = amp_features
+                    update_amp_history_(self.amp_history, amp_features, self.amp_history_shift)
                     
                     reset_env_ids = dones.nonzero(as_tuple=False).squeeze(-1)
                     if len(reset_env_ids) > 0:
                         self.amp_history[reset_env_ids] = amp_features[reset_env_ids].unsqueeze(1).expand(-1, self.amp_config.history_length, -1)
                     
-                    amp_rollout_data.append(self.amp_history.clone())
+                    amp_rollout_data[step_idx].copy_(self.amp_history)
 
                     self.alg.process_env_step(obs, rewards, dones, extras)
                     intrinsic_rewards = self.alg.intrinsic_rewards if self.cfg["algorithm"]["rnd_cfg"] else None
@@ -207,7 +219,7 @@ class MjlabAMPOnPolicyRunner(VelocityOnPolicyRunner):
 
             loss_dict = self.alg.update()
 
-            amp_obs_batch = torch.cat(amp_rollout_data, dim=0) # [num_steps * num_envs, H, D]
+            amp_obs_batch = amp_rollout_data.flatten(0, 1)  # [num_steps * num_envs, H, D]
             if not self.is_distributed or self.gpu_global_rank == 0:
                 amp_metrics = self.amp_optimizer.train_step(amp_obs_batch)
                 amp_metrics["amp/steps_skipped"] = self.amp_optimizer.skip_counter

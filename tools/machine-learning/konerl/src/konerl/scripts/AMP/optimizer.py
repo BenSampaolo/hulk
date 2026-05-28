@@ -5,7 +5,6 @@ import dataclasses
 from .discriminator import AMPDiscriminator
 from .mocap_buffer import MocapBuffer
 
-import numpy as np
 
 class DiscriminatorReplayBuffer:
     def __init__(self, capacity: int, obs_shape: tuple[int, ...], device: torch.device | str):
@@ -151,8 +150,8 @@ class AMPOptimizer:
             real_logits = self.discriminator(real_batch)
             fake_logits = self.discriminator(fake_batch)
             
-            acc_real = (real_logits > 0.0).float().mean().item()
-            acc_fake = (fake_logits < 0.0).float().mean().item()
+            acc_real = (real_logits > 0.0).float().mean().detach()
+            acc_fake = (fake_logits < 0.0).float().mean().detach()
             
             # if acc_fake >= self.config.target_accuracy:
             #     print(f"[AMP] Skipping discriminator update due to high fake accuracy ({acc_fake:.2f} >= {self.config.target_accuracy:.2f}).")
@@ -189,14 +188,16 @@ class AMPOptimizer:
             total_loss.backward()
             self.optimizer.step()
 
-            self.metrics["amp/loss"].append(total_loss.item())
-            self.metrics["amp/logits_real"].append(real_logits.mean().item())
-            self.metrics["amp/logits_fake"].append(fake_logits.mean().item())
-            self.metrics["amp/grad_penalty"].append(gp.item())
+            self.metrics["amp/loss"].append(total_loss.detach())
+            self.metrics["amp/logits_real"].append(real_logits.mean().detach())
+            self.metrics["amp/logits_fake"].append(fake_logits.mean().detach())
+            self.metrics["amp/grad_penalty"].append(gp.detach())
             self.metrics["amp/accuracy_real"].append(acc_real)
             self.metrics["amp/accuracy_fake"].append(acc_fake)
 
-        results: dict[str, float] = {k: float(np.mean(v))if len(v) > 0 else 0.0 for k, v in self.metrics.items()}
+        results: dict[str, float] = {
+            k: torch.stack(v).mean().item() if len(v) > 0 else 0.0 for k, v in self.metrics.items()
+        }
         acc_real = results["amp/accuracy_real"]
         acc_fake = results["amp/accuracy_fake"]
         results["amp/accuracy"] = (acc_real + acc_fake) / 2.0

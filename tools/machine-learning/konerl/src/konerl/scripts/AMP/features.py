@@ -77,14 +77,54 @@ def joint_indices(robot: Any, joint_names: Iterable[str], device: torch.device |
     return torch.tensor(indices, device=device, dtype=torch.long)
 
 
+def amp_features_from_robot_indices(
+    robot: Any,
+    joint_ids: torch.Tensor,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Build AMP features using precomputed joint indices.
+
+    This is the hot-path variant used during rollouts/reward computation. It
+    avoids rebuilding a Python name->index lookup and allocating an index tensor
+    every environment step. If ``out`` is provided, the feature tensor is written
+    in-place to avoid a per-step ``torch.cat`` allocation.
+    """
+    if out is None:
+        return torch.cat(
+            [
+                robot.data.joint_pos[:, joint_ids],
+                robot.data.joint_vel[:, joint_ids],
+                robot.data.root_link_lin_vel_b,
+                robot.data.root_link_ang_vel_b,
+            ],
+            dim=-1,
+        )
+
+    n_joints = joint_ids.numel()
+    out[:, :n_joints].copy_(robot.data.joint_pos[:, joint_ids])
+    out[:, n_joints : 2 * n_joints].copy_(robot.data.joint_vel[:, joint_ids])
+    out[:, 2 * n_joints : 2 * n_joints + 3].copy_(robot.data.root_link_lin_vel_b)
+    out[:, 2 * n_joints + 3 : 2 * n_joints + 6].copy_(robot.data.root_link_ang_vel_b)
+    return out
+
+
 def amp_features_from_robot(robot: Any, joint_names: Iterable[str], device: torch.device | str) -> torch.Tensor:
     ids = joint_indices(robot, joint_names, device)
-    return torch.cat(
-        [
-            robot.data.joint_pos[:, ids],
-            robot.data.joint_vel[:, ids],
-            robot.data.root_link_lin_vel_b,
-            robot.data.root_link_ang_vel_b,
-        ],
-        dim=-1,
-    )
+    return amp_features_from_robot_indices(robot, ids)
+
+
+def update_amp_history_(
+    history: torch.Tensor,
+    current_features: torch.Tensor,
+    shift_buffer: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Shift AMP history left by one and append current features in-place."""
+    if history.shape[1] > 1:
+        if shift_buffer is None:
+            # Fallback for callers that do not have a persistent scratch buffer.
+            history[:, :-1].copy_(history[:, 1:].clone())
+        else:
+            shift_buffer.copy_(history[:, 1:])
+            history[:, :-1].copy_(shift_buffer)
+    history[:, -1].copy_(current_features)
+    return history
