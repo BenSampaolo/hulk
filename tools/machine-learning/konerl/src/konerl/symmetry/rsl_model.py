@@ -283,16 +283,38 @@ class K1VelocityEquivariantMLPModel(EquivariantMLPModel):
     """
 
     def __init__(self, obs: TensorDict, obs_groups: dict[str, list[str]], obs_set: str, output_dim: int, **kwargs) -> None:
-        from .k1_specs import K1_ACTION_SPEC, K1_VELOCITY_ACTOR_SPEC, K1_VELOCITY_CRITIC_SPEC
+        from .k1_specs import (
+            K1_ACTION_SPEC,
+            K1_FULL_BODY_ACTION_SPEC,
+            K1_FULL_BODY_VELOCITY_ACTOR_SPEC,
+            K1_FULL_BODY_VELOCITY_CRITIC_SPEC,
+            K1_VELOCITY_ACTOR_SPEC,
+            K1_VELOCITY_CRITIC_SPEC,
+        )
 
+        obs_dim = sum(obs[group].shape[-1] for group in obs_groups[obs_set])
         if obs_set == "actor":
-            kwargs.setdefault("input_reflection_perm", K1_VELOCITY_ACTOR_SPEC.perm)
-            kwargs.setdefault("input_reflection_sign", K1_VELOCITY_ACTOR_SPEC.sign)
-            kwargs.setdefault("output_reflection_perm", K1_ACTION_SPEC.perm)
-            kwargs.setdefault("output_reflection_sign", K1_ACTION_SPEC.sign)
+            if output_dim == K1_FULL_BODY_ACTION_SPEC.dim:
+                input_spec = K1_FULL_BODY_VELOCITY_ACTOR_SPEC
+                output_spec = K1_FULL_BODY_ACTION_SPEC
+            elif output_dim == K1_ACTION_SPEC.dim:
+                input_spec = K1_VELOCITY_ACTOR_SPEC
+                output_spec = K1_ACTION_SPEC
+            else:
+                raise ValueError(f"Unsupported K1 actor output dimension: {output_dim}.")
+            kwargs.setdefault("input_reflection_perm", input_spec.perm)
+            kwargs.setdefault("input_reflection_sign", input_spec.sign)
+            kwargs.setdefault("output_reflection_perm", output_spec.perm)
+            kwargs.setdefault("output_reflection_sign", output_spec.sign)
         elif obs_set == "critic":
-            kwargs.setdefault("input_reflection_perm", K1_VELOCITY_CRITIC_SPEC.perm)
-            kwargs.setdefault("input_reflection_sign", K1_VELOCITY_CRITIC_SPEC.sign)
+            if obs_dim == K1_FULL_BODY_VELOCITY_CRITIC_SPEC.dim:
+                input_spec = K1_FULL_BODY_VELOCITY_CRITIC_SPEC
+            elif obs_dim == K1_VELOCITY_CRITIC_SPEC.dim:
+                input_spec = K1_VELOCITY_CRITIC_SPEC
+            else:
+                raise ValueError(f"Unsupported K1 critic observation dimension: {obs_dim}.")
+            kwargs.setdefault("input_reflection_perm", input_spec.perm)
+            kwargs.setdefault("input_reflection_sign", input_spec.sign)
             kwargs.setdefault("invariant_output", True)
         super().__init__(obs, obs_groups, obs_set, output_dim, **kwargs)
 

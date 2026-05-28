@@ -138,7 +138,9 @@ def make_velocity_env_cfg(play: bool, *, amp: bool = False, control_arms: bool =
         terrain_type = "flat"
     return ManagerBasedRlEnvCfg(
         scene=make_scene_cfg(terrain_type, control_arms=control_arms),
-        observations=make_observation_cfg(),
+        observations=make_observation_cfg(
+            controlled_joint_names=K1_AMP_FULL_BODY_JOINT_NAMES if control_arms else K1_AMP_JOINT_NAMES,
+        ),
         actions=make_actions_cfg(),
         commands=make_commands_cfg(),
         events=make_events_cfg(),

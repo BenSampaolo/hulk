@@ -312,7 +312,13 @@ def safe_foot_contact_forces(env, sensor_name: str) -> torch.Tensor:
     obs = mdp.foot_contact_forces(env, sensor_name)
     return torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
 
-def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
+def make_observation_cfg(controlled_joint_names: tuple[str, ...] | None = None) -> dict[str, ObservationGroupCfg]:
+    joint_asset_cfg = SceneEntityCfg(
+        "robot",
+        joint_names=controlled_joint_names,
+        preserve_order=True,
+    )
+
     policy_terms = {
         "base_ang_vel": ObservationTermCfg(
             func=mdp.builtin_sensor,
@@ -329,12 +335,14 @@ def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
         ),
         "joint_pos": ObservationTermCfg(
             func=mdp.joint_pos_rel,
+            params={"asset_cfg": joint_asset_cfg},
             noise=ClippedGaussianNoiseCfg(mean=0, std=0.003, min=-0.03, max=0.03),
             delay_min_lag=1,
             delay_max_lag=2,
         ),
         "joint_vel": ObservationTermCfg(
             func=JOINT_VEL_REL_SMOOTHED,
+            params={"asset_cfg": joint_asset_cfg},
             noise=ClippedGaussianNoiseCfg(mean=0, std=0.015, min=-0.05, max=0.05),
             delay_min_lag=1,
             delay_max_lag=2,
@@ -361,9 +369,11 @@ def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
         ),
         "joint_pos": ObservationTermCfg(
             func=mdp.joint_pos_rel,
+            params={"asset_cfg": joint_asset_cfg},
         ),
         "joint_vel": ObservationTermCfg(
             func=JOINT_VEL_REL_SMOOTHED,
+            params={"asset_cfg": joint_asset_cfg},
         ),
         "actions": ObservationTermCfg(
             func=mdp.last_action,
@@ -439,7 +449,7 @@ def make_observation_cfg() -> dict[str, ObservationGroupCfg]:
         ),
         "encoder_bias": ObservationTermCfg(
             func=obs_encoder_bias,
-            params={"asset_cfg": SceneEntityCfg("robot")}
+            params={"asset_cfg": joint_asset_cfg}
         ),
         "push_force": ObservationTermCfg(
             func=obs_push_force,
