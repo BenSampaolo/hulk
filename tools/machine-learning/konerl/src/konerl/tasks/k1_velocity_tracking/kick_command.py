@@ -124,7 +124,10 @@ class KickCommand(CommandTerm):
         )
     
     def _resample_command(self, env_ids: torch.Tensor) -> None:
-        r = torch.empty(len(env_ids), device=self.device)
+        num_env_ids = len(env_ids)
+
+        def sample_uniform(range_: tuple[float, float]) -> torch.Tensor:
+            return torch.empty(num_env_ids, device=self.device).uniform_(*range_)
 
         cumulative_fractions = torch.tensor([
             self.cfg.rel_dribble_envs,
@@ -132,7 +135,7 @@ class KickCommand(CommandTerm):
             self.cfg.rel_dribble_envs + self.cfg.rel_kick_envs + self.cfg.rel_standing_envs,
         ], device=self.device)
 
-        rand_vals = r.uniform_(0.0, 1.0)
+        rand_vals = torch.empty(num_env_ids, device=self.device).uniform_(0.0, 1.0)
 
         self.is_dribble_env[env_ids] = rand_vals < cumulative_fractions[0]
         self.is_kicking_env[env_ids] = (rand_vals >= cumulative_fractions[0]) & (rand_vals < cumulative_fractions[1])
@@ -145,45 +148,45 @@ class KickCommand(CommandTerm):
         
         self.gait_frequency[env_ids] = torch.where(
             is_moving,
-            r.uniform_(*self.cfg.ranges.gait_frequency),
+            sample_uniform(self.cfg.ranges.gait_frequency),
             torch.zeros_like(self.gait_frequency[env_ids], device=self.device)
         )
 
         self.vel_command_b[env_ids, 0] = torch.where(
             self.is_walking_env[env_ids],
-            r.uniform_(*self.cfg.ranges.walking_lin_vel_x),
+            sample_uniform(self.cfg.ranges.walking_lin_vel_x),
             torch.where(
                 self.is_dribble_env[env_ids],
-                r.uniform_(*self.cfg.ranges.dribble_lin_vel_x),
+                sample_uniform(self.cfg.ranges.dribble_lin_vel_x),
                 torch.zeros_like(self.vel_command_b[env_ids, 0], device=self.device)
             )
         )
         self.vel_command_b[env_ids, 1] = torch.where(
             self.is_walking_env[env_ids],
-            r.uniform_(*self.cfg.ranges.walking_lin_vel_y),
+            sample_uniform(self.cfg.ranges.walking_lin_vel_y),
             torch.where(
                 self.is_dribble_env[env_ids],
-                r.uniform_(*self.cfg.ranges.dribble_lin_vel_y), 
+                sample_uniform(self.cfg.ranges.dribble_lin_vel_y), 
                 torch.zeros_like(self.vel_command_b[env_ids, 1], device=self.device)
             )
         )
         self.vel_command_b[env_ids, 2] = torch.where(
             self.is_walking_env[env_ids],
-            r.uniform_(*self.cfg.ranges.walking_ang_vel_z),
+            sample_uniform(self.cfg.ranges.walking_ang_vel_z),
             torch.where(
                 self.is_dribble_env[env_ids],
-                r.uniform_(*self.cfg.ranges.dribble_ang_vel_z),
+                sample_uniform(self.cfg.ranges.dribble_ang_vel_z),
                 torch.zeros_like(self.vel_command_b[env_ids, 2], device=self.device)
             )
         )
 
         # This samples a random point of the upper half of the unit 
         # sphere and scales it by the kick velocity range
-        kick_magnitudes = r.uniform_(*self.cfg.ranges.kick_vel).unsqueeze(-1)
+        kick_magnitudes = sample_uniform(self.cfg.ranges.kick_vel).unsqueeze(-1)
         kick_directions = torch.nn.functional.normalize(
             torch.cat((
-                torch.randn(len(env_ids), 2, device=self.device), 
-                torch.randn(len(env_ids), 1, device=self.device).abs()
+                torch.randn(num_env_ids, 2, device=self.device), 
+                torch.randn(num_env_ids, 1, device=self.device).abs()
             ), dim=1), dim=1
         )
         self.kick_direction_command_b[env_ids] = torch.where(
