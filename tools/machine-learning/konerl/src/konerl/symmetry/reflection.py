@@ -41,9 +41,20 @@ class ReflectionSpec:
                     "Swapped channels must have the same sign."
                 )
 
+    def _cache_is_valid(self, device: torch.device) -> bool:
+        return (
+            self._sign_tensor.device == device
+            and self._perm_tensor.device == device
+            and not self._sign_tensor.is_inference()
+            and not self._perm_tensor.is_inference()
+        )
+
     def to(self, device: str | torch.device) -> ReflectionSpec:
-        self._sign_tensor = self._sign_tensor.to(device)
-        self._perm_tensor = self._perm_tensor.to(device)
+        target_device = torch.device(device)
+        if not self._cache_is_valid(target_device):
+            with torch.inference_mode(False):
+                self._sign_tensor = torch.tensor(self.sign, device=target_device)
+                self._perm_tensor = torch.tensor(self.perm, dtype=torch.long, device=target_device)
         return self
 
     def even_indices(self) -> torch.Tensor:

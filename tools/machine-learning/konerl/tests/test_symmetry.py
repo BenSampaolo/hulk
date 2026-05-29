@@ -193,6 +193,28 @@ class TestSymmetryRegressionFixes(unittest.TestCase):
         reflected_grad = output_spec.apply(input_spec.apply(grad, dim=1), dim=0)
         torch.testing.assert_close(grad, reflected_grad, atol=1e-6, rtol=1e-6)
 
+    def test_reflection_spec_recovers_from_inference_tensor_cache(self) -> None:
+        input_spec = ReflectionSpec(perm=[1, 0], sign=[1, 1])
+        output_spec = ReflectionSpec.hidden(even_dim=1, odd_dim=1)
+        layer = ReflectionEquivariantLinear(input_spec, output_spec)
+
+        with torch.inference_mode():
+            for spec in (input_spec, output_spec):
+                spec._sign_tensor = spec._sign_tensor.clone()
+                spec._perm_tensor = spec._perm_tensor.clone()
+                self.assertTrue(spec._sign_tensor.is_inference())
+                self.assertTrue(spec._perm_tensor.is_inference())
+
+        x = torch.randn(8, input_spec.dim, requires_grad=True)
+        loss = layer(x).square().sum()
+        loss.backward()
+
+        self.assertIsNotNone(layer.weight_raw.grad)
+        self.assertFalse(input_spec._sign_tensor.is_inference())
+        self.assertFalse(input_spec._perm_tensor.is_inference())
+        self.assertFalse(output_spec._sign_tensor.is_inference())
+        self.assertFalse(output_spec._perm_tensor.is_inference())
+
 
 if __name__ == "__main__":
     unittest.main()
