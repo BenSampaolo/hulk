@@ -713,17 +713,6 @@ def make_reward_cfg(
                 "command_threshold": 0.05,
             },
         ),
-        "foot_swing_height": RewardTermCfg(
-            func=mdp.feet_swing_height,
-            weight=-0.25,
-            params={
-                "sensor_name": "feet_ground_contact",
-                "height_sensor_name": "foot_height_scan",
-                "target_height": 0.08,
-                "command_name": "twist",
-                "command_threshold": 0.05,
-            },
-        ),
         "foot_slip": RewardTermCfg(
             func=mdp.feet_slip,
             weight=-0.05,
@@ -748,7 +737,7 @@ def make_reward_cfg(
     if arm_default_pose:
         rewards["arm_default_pose"] = RewardTermCfg(
             func=joint_default_pose_l2,
-            weight=-0.15,
+            weight=-0.01,
             params={
                 "asset_cfg": SceneEntityCfg(
                     "robot",
