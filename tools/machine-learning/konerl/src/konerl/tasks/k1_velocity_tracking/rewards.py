@@ -17,10 +17,12 @@ from konerl.scripts.AMP.optimizer import AMPOptimizer
 from konerl.scripts.AMP.cache import AMPStateCache
 from konerl.scripts.AMP.features import K1_AMP_ARM_JOINT_NAMES, K1_AMP_JOINT_NAMES
 
+
 def get_yaw_from_quaternion(quat: torch.Tensor) -> torch.Tensor:
     """Extract yaw from a quaternion [w, x, y, z]."""
     w, x, y, z = quat[..., 0], quat[..., 1], quat[..., 2], quat[..., 3]
     return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
 
 def quat_from_yaw(yaw: torch.Tensor) -> torch.Tensor:
     """Create a yaw-only quaternion [w, x, y, z] from a yaw angle."""
@@ -30,6 +32,7 @@ def quat_from_yaw(yaw: torch.Tensor) -> torch.Tensor:
     x = torch.zeros_like(yaw)
     y = torch.zeros_like(yaw)
     return torch.stack([w, x, y, z], dim=-1)
+
 
 class BoundedPenaltyWrapper:
     """Wraps both stateless functions and stateful classes to bound their penalties."""
@@ -48,6 +51,7 @@ class BoundedPenaltyWrapper:
         raw_penalty = self.inner_callable(env, **inner_kwargs)
         return torch.exp(-torch.abs(raw_penalty) / self.std)
 
+
 def bad_base_height(
     env: ManagerBasedRlEnv,
     limit_height: float = 0.3,
@@ -56,6 +60,7 @@ def bad_base_height(
     """Penalizes when the base height falls below the limit height."""
     asset: Entity = env.scene[asset_cfg.name]
     return asset.data.root_link_pos_w[:, 2] < limit_height
+
 
 def target_base_height(
     env: ManagerBasedRlEnv,
@@ -66,7 +71,7 @@ def target_base_height(
     """Rewards when the base height is close to the target height."""
     asset: Entity = env.scene[asset_cfg.name]
     height_error = torch.abs(asset.data.root_link_pos_w[:, 2] - target_height)
-    return torch.exp(-height_error / std**2) 
+    return torch.exp(-height_error / std**2)
 
 
 def base_height_below_l2(
@@ -78,27 +83,29 @@ def base_height_below_l2(
     asset: Entity = env.scene[asset_cfg.name]
     height_error = torch.clamp(threshold - asset.data.root_link_pos_w[:, 2], min=0.0)
     return torch.square(height_error)
-    
+
+
 class TargetBaseHeightMean:
     def __init__(
-        self, 
-        cfg: RewardTermCfg, 
+        self,
+        cfg: RewardTermCfg,
         env: ManagerBasedRlEnv,
     ):
         self._env = env
         device = getattr(env, "device", "cpu")
         self._base_height_ema = torch.zeros(size=[env.num_envs], device=device)
         self._asset_cfg: SceneEntityCfg = cfg.params.get(
-            "asset_cfg", SceneEntityCfg("robot"),
+            "asset_cfg",
+            SceneEntityCfg("robot"),
         )
-    
+
     def __call__(
-            self, 
-            env, 
-            ema_alpha = 0.8, 
-            std = 0.25,
-            target_height = 0.5,
-        ):
+        self,
+        env,
+        ema_alpha=0.8,
+        std=0.25,
+        target_height=0.5,
+    ):
         asset: Entity = env.scene[self._asset_cfg.name]
         assert asset is not None
 
@@ -106,20 +113,19 @@ class TargetBaseHeightMean:
         self._base_height_ema += ema_alpha * asset.data.root_link_pos_w[:, 2]
         height_error = torch.abs(self._base_height_ema - target_height)
         return torch.exp(-height_error / std**2)
-        
+
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
             self._base_height_ema.fill_(0.0)
         else:
             self._base_height_ema[env_ids] = 0.0
 
+
 class ActionJerkL2:
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
         self._env = env
         device = getattr(env, "device", "cpu")
-        self._prev_prev_prev_action = torch.zeros(
-            (env.num_envs, env.action_manager.total_action_dim), device=device
-        )
+        self._prev_prev_prev_action = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=device)
         self._prev_prev_action = torch.zeros_like(self._prev_prev_prev_action)
         self._prev_action = torch.zeros_like(self._prev_prev_prev_action)
 
@@ -135,17 +141,13 @@ class ActionJerkL2:
 
     def __call__(self, env: ManagerBasedRlEnv) -> torch.Tensor:
         current_action = env.action_manager.action
-        jerk = (
-            current_action
-            - 3.0 * self._prev_action
-            + 3.0 * self._prev_prev_action
-            - self._prev_prev_prev_action
-        )
+        jerk = current_action - 3.0 * self._prev_action + 3.0 * self._prev_prev_action - self._prev_prev_prev_action
         self._prev_prev_prev_action[:] = self._prev_prev_action
         self._prev_prev_action[:] = self._prev_action
         self._prev_action[:] = current_action
 
         return torch.sum(torch.square(jerk), dim=1)
+
 
 def is_walking_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
     command = env.command_manager.get_term(command_name)
@@ -155,6 +157,7 @@ def is_walking_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch
     assert walking_env_flag is not None
     return walking_env_flag
 
+
 def is_kicking_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
     command = env.command_manager.get_term(command_name)
     assert command is not None
@@ -162,6 +165,7 @@ def is_kicking_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch
     kicking_env_flag = getattr(command, "is_kicking_env", None)
     assert kicking_env_flag is not None
     return kicking_env_flag
+
 
 def is_dribble_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
     command = env.command_manager.get_term(command_name)
@@ -171,6 +175,7 @@ def is_dribble_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch
     assert dribble_env_flag is not None
     return dribble_env_flag
 
+
 def is_standing_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
     command = env.command_manager.get_term(command_name)
     assert command is not None
@@ -178,6 +183,7 @@ def is_standing_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torc
     standing_env_flag = getattr(command, "is_standing_env", None)
     assert standing_env_flag is not None
     return standing_env_flag
+
 
 def distance_to_ball_reward(
     env: ManagerBasedRlEnv,
@@ -192,23 +198,24 @@ def distance_to_ball_reward(
     assert robot is not None
     ball: Entity = env.scene[ball_cfg.name]
     assert ball is not None
-    
+
     command = env.command_manager.get_command(command_name)
     assert command is not None
-    
+
     can_touch = command[:, 6] > 0.5
     not_free = ~can_touch
-    
+
     ball_pos = ball.data.root_link_pos_w[:, :2]
     robot_pos = robot.data.root_link_pos_w[:, :2]
-    
+
     dist = torch.norm(ball_pos - robot_pos, dim=-1)
     error = torch.abs(dist - target_distance)
     proximity = torch.exp(-error / std**2)
     reward = torch.zeros_like(proximity)
-    
+
     active = (is_kicking_env(env, command_name) | is_dribble_env(env, command_name)) & not_free
     return torch.where(active, proximity, reward)
+
 
 def kick_contact_reward(
     env: ManagerBasedRlEnv,
@@ -226,16 +233,17 @@ def kick_contact_reward(
 
     return torch.where(can_touch, contact, -contact)
 
+
 class KickVelocityReward:
     def __init__(
-        self, 
-        cfg: RewardTermCfg, 
+        self,
+        cfg: RewardTermCfg,
         env: ManagerBasedRlEnv,
     ):
         self.env = env
         self.cfg = cfg
         self.active: torch.Tensor = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
-    
+
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
             self.active.fill_(0.0)
@@ -249,7 +257,7 @@ class KickVelocityReward:
         robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
         ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
         sensor_name: str = "robot_ball_collision",
-        std: float = 5.0
+        std: float = 5.0,
     ) -> torch.Tensor:
         "Rewards the ball's velocity in the commanded direction when contact is made during a kick"
         sensor = env.scene.sensors[sensor_name]
@@ -269,20 +277,21 @@ class KickVelocityReward:
 
         trunk_quat_w = robot.data.root_link_quat_w
         ball_vel_w = ball.data.root_link_vel_w[:, :3]
-        
+
         yaw = get_yaw_from_quaternion(trunk_quat_w)
         yaw_only_quat_w = quat_from_yaw(yaw)
-        
+
         ball_vel_heading = quat_apply(quat_inv(yaw_only_quat_w), ball_vel_w)
 
         error = torch.norm(ball_vel_heading - command[:, 3:6], dim=-1)
 
         return torch.exp(-error / std**2) * (self.active > 0.0).float()
 
+
 class TrackLinearVelocityMean:
     def __init__(
-        self, 
-        cfg: RewardTermCfg, 
+        self,
+        cfg: RewardTermCfg,
         env: ManagerBasedRlEnv,
     ):
         self._env = env
@@ -290,9 +299,10 @@ class TrackLinearVelocityMean:
         self._xy_command_ema = torch.zeros(size=[env.num_envs, 2], device=device)
         self._xy_velocity_ema = torch.zeros(size=[env.num_envs, 2], device=device)
         self._asset_cfg: SceneEntityCfg = cfg.params.get(
-            "asset_cfg", SceneEntityCfg("robot", site_names="Trunk"),
+            "asset_cfg",
+            SceneEntityCfg("robot", site_names="Trunk"),
         )
-    
+
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
             self._xy_command_ema.fill_(0.0)
@@ -318,15 +328,14 @@ class TrackLinearVelocityMean:
         trunk_pos_w = robot.data.root_link_pos_w
         trunk_quat_w = robot.data.root_link_quat_w
         ball_pos_w = ball.data.root_link_pos_w
-        
+
         rel_pos_w = ball_pos_w - trunk_pos_w
-        
+
         yaw = get_yaw_from_quaternion(trunk_quat_w)
         yaw_only_quat_w = quat_from_yaw(yaw)
-        
+
         ball_pos_heading = quat_apply(quat_inv(yaw_only_quat_w), rel_pos_w)
         self._xy_command_ema *= 1 - ema_alpha
-
 
         # Chooses the command based on the env type
         self._xy_command_ema += torch.where(
@@ -343,13 +352,13 @@ class TrackLinearVelocityMean:
 
         xy_error = torch.sum(torch.square(self._xy_command_ema - self._xy_velocity_ema), dim=1)
 
-        return torch.exp(-xy_error / std ** 2)
+        return torch.exp(-xy_error / std**2)
 
 
 class TrackAngularVelocityMean:
     def __init__(
-        self, 
-        cfg: RewardTermCfg, 
+        self,
+        cfg: RewardTermCfg,
         env: ManagerBasedRlEnv,
     ):
         self._env = env
@@ -357,9 +366,10 @@ class TrackAngularVelocityMean:
         self._z_command_ema = torch.zeros(size=[env.num_envs], device=device)
         self._z_velocity_ema = torch.zeros(size=[env.num_envs], device=device)
         self._asset_cfg: SceneEntityCfg = cfg.params.get(
-            "asset_cfg", SceneEntityCfg("robot", site_names="Trunk"),
+            "asset_cfg",
+            SceneEntityCfg("robot", site_names="Trunk"),
         )
-    
+
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
             self._z_command_ema.fill_(0.0)
@@ -390,9 +400,10 @@ class TrackAngularVelocityMean:
 
         return torch.where(
             is_walking_env(env, command_name) | is_dribble_env(env, command_name),
-            torch.exp(-z_error / std ** 2),
-            torch.zeros_like(z_error)
+            torch.exp(-z_error / std**2),
+            torch.zeros_like(z_error),
         )
+
 
 def ball_dribble_position(
     env: ManagerBasedRlEnv,
@@ -408,25 +419,26 @@ def ball_dribble_position(
     ball: Entity = env.scene[ball_cfg.name]
     command = env.command_manager.get_command(command_name)
     assert command is not None
-    
+
     can_touch = command[:, 6] > 0.5
 
     ball_pos = ball.data.root_link_pos_w[:, :2]
     robot_pos = robot.data.root_link_pos_w[:, :2]
-    
+
     dist_to_ball = torch.norm(ball_pos - robot_pos, dim=-1)
     in_range = dist_to_ball <= in_range_dist
-    
+
     heading = robot.data.heading_w
     forward_vec = torch.stack([torch.cos(heading), torch.sin(heading)], dim=-1)
-    
+
     target_pos = robot_pos + forward_vec * target_distance
     error = torch.norm(ball_pos - target_pos, dim=-1)
-    
+
     reward = torch.exp(-error / std**2)
-    
+
     active = is_dribble_env(env, command_name) & can_touch & in_range
     return torch.where(active, reward, torch.zeros_like(reward))
+
 
 def ball_approach_alignment(
     env: ManagerBasedRlEnv,
@@ -439,12 +451,12 @@ def ball_approach_alignment(
     ball: Entity = env.scene[ball_cfg.name]
     command = env.command_manager.get_command(command_name)
     assert command is not None
-    
+
     robot_pos_w = robot.data.root_link_pos_w
     ball_pos_w = ball.data.root_link_pos_w
-    
+
     relative_pos_w = ball_pos_w - robot_pos_w
-    
+
     robot_quat_w = robot.data.root_link_quat_w
     relative_pos_b = quat_apply(quat_inv(robot_quat_w), relative_pos_w)
 
@@ -455,6 +467,7 @@ def ball_approach_alignment(
     alignment_score = 1.0 - (abs(angle_to_ball) / torch.pi)
 
     return alignment_score * active
+
 
 def feet_air_time(
     env: ManagerBasedRlEnv,
@@ -475,9 +488,7 @@ def feet_air_time(
     reward = torch.sum(in_range.float(), dim=1)
     in_air = current_air_time > 0
     num_in_air = torch.sum(in_air.float())
-    mean_air_time = torch.sum(current_air_time * in_air.float()) / torch.clamp(
-        num_in_air, min=1
-    )
+    mean_air_time = torch.sum(current_air_time * in_air.float()) / torch.clamp(num_in_air, min=1)
     env.extras["log"]["Metrics/air_time_mean"] = mean_air_time
 
     command_active = (command[:, :2] ** 2).sum(dim=-1).sqrt() > command_threshold
@@ -486,98 +497,97 @@ def feet_air_time(
 
     return reward * active
 
+
 class feet_swing_height:
-  """Penalize deviation from target swing height, evaluated at landing."""
+    """Penalize deviation from target swing height, evaluated at landing."""
 
-  def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-    height_sensor = env.scene[cfg.params["height_sensor_name"]]
-    assert isinstance(height_sensor, TerrainHeightSensor), (
-      f"feet_swing_height requires a TerrainHeightSensor, got {type(height_sensor).__name__}"
-    )
-    num_feet = height_sensor.num_frames
-    self.peak_heights = torch.zeros(
-      (env.num_envs, num_feet), device=env.device, dtype=torch.float32
-    )
-    self.step_dt = env.step_dt
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        height_sensor = env.scene[cfg.params["height_sensor_name"]]
+        assert isinstance(height_sensor, TerrainHeightSensor), (
+            f"feet_swing_height requires a TerrainHeightSensor, got {type(height_sensor).__name__}"
+        )
+        num_feet = height_sensor.num_frames
+        self.peak_heights = torch.zeros((env.num_envs, num_feet), device=env.device, dtype=torch.float32)
+        self.step_dt = env.step_dt
 
-  def __call__(
-    self,
-    env: ManagerBasedRlEnv,
-    sensor_name: str,
-    height_sensor_name: str,
-    target_height: float,
-    command_name: str,
-    command_threshold: float,
-  ) -> torch.Tensor:
-    contact_sensor: ContactSensor = env.scene[sensor_name]
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-    height_sensor: TerrainHeightSensor = env.scene[height_sensor_name]
-    foot_heights = height_sensor.data.heights
-    in_air = contact_sensor.data.found == 0
-    self.peak_heights = torch.where(
-      in_air,
-      torch.maximum(self.peak_heights, foot_heights),
-      self.peak_heights,
-    )
-    first_contact = contact_sensor.compute_first_contact(dt=self.step_dt)
-    active = is_standing_env(env, command_name) < 0.5
-    error = self.peak_heights / target_height - 1.0
-    cost = torch.sum(torch.square(error) * first_contact.float(), dim=1) * active
-    num_landings = torch.sum(first_contact.float())
-    peak_heights_at_landing = self.peak_heights * first_contact.float()
-    mean_peak_height = torch.sum(peak_heights_at_landing) / torch.clamp(
-      num_landings, min=1
-    )
-    env.extras["log"]["Metrics/peak_height_mean"] = mean_peak_height
-    self.peak_heights = torch.where(
-      first_contact,
-      torch.zeros_like(self.peak_heights),
-      self.peak_heights,
-    )
-    return cost
+    def __call__(
+        self,
+        env: ManagerBasedRlEnv,
+        sensor_name: str,
+        height_sensor_name: str,
+        target_height: float,
+        command_name: str,
+        command_threshold: float,
+    ) -> torch.Tensor:
+        contact_sensor: ContactSensor = env.scene[sensor_name]
+        command = env.command_manager.get_command(command_name)
+        assert command is not None
+        height_sensor: TerrainHeightSensor = env.scene[height_sensor_name]
+        foot_heights = height_sensor.data.heights
+        in_air = contact_sensor.data.found == 0
+        self.peak_heights = torch.where(
+            in_air,
+            torch.maximum(self.peak_heights, foot_heights),
+            self.peak_heights,
+        )
+        first_contact = contact_sensor.compute_first_contact(dt=self.step_dt)
+        active = is_standing_env(env, command_name) < 0.5
+        error = self.peak_heights / target_height - 1.0
+        cost = torch.sum(torch.square(error) * first_contact.float(), dim=1) * active
+        num_landings = torch.sum(first_contact.float())
+        peak_heights_at_landing = self.peak_heights * first_contact.float()
+        mean_peak_height = torch.sum(peak_heights_at_landing) / torch.clamp(num_landings, min=1)
+        env.extras["log"]["Metrics/peak_height_mean"] = mean_peak_height
+        self.peak_heights = torch.where(
+            first_contact,
+            torch.zeros_like(self.peak_heights),
+            self.peak_heights,
+        )
+        return cost
+
 
 def contact_any(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
-  """Penalty signal for any contact reported by a contact sensor."""
-  sensor: ContactSensor = env.scene[sensor_name]
-  if sensor.data.found is None:
-    return torch.zeros(env.num_envs, device=env.device)
-  found = sensor.data.found.reshape(env.num_envs, -1)
-  return torch.any(found > 0.5, dim=1).float()
+    """Penalty signal for any contact reported by a contact sensor."""
+    sensor: ContactSensor = env.scene[sensor_name]
+    if sensor.data.found is None:
+        return torch.zeros(env.num_envs, device=env.device)
+    found = sensor.data.found.reshape(env.num_envs, -1)
+    return torch.any(found > 0.5, dim=1).float()
 
 
 def joint_default_pose_l2(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-  """Mean squared deviation from configured default joint pose."""
-  asset: Entity = env.scene[asset_cfg.name]
-  joint_ids = asset_cfg.joint_ids
-  error = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
-  return torch.mean(torch.square(error), dim=1)
+    """Mean squared deviation from configured default joint pose."""
+    asset: Entity = env.scene[asset_cfg.name]
+    joint_ids = asset_cfg.joint_ids
+    error = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
+    return torch.mean(torch.square(error), dim=1)
 
 
 def soft_landing(
-  env: ManagerBasedRlEnv,
-  sensor_name: str,
-  command_name: str | None = None,
-  command_threshold: float = 0.05,
+    env: ManagerBasedRlEnv,
+    sensor_name: str,
+    command_name: str | None = None,
+    command_threshold: float = 0.05,
 ) -> torch.Tensor:
-  """Penalize high impact forces at landing to encourage soft footfalls."""
-  contact_sensor: ContactSensor = env.scene[sensor_name]
-  sensor_data = contact_sensor.data
-  assert sensor_data.force is not None
-  forces = sensor_data.force  # [B, N, 3]
-  force_magnitude = torch.norm(forces, dim=-1)  # [B, N]
-  first_contact = contact_sensor.compute_first_contact(dt=env.step_dt)  # [B, N]
-  landing_impact = force_magnitude * first_contact.float()  # [B, N]
-  cost = torch.sum(landing_impact, dim=1)  # [B]
-  num_landings = torch.sum(first_contact.float())
-  mean_landing_force = torch.sum(landing_impact) / torch.clamp(num_landings, min=1)
-  env.extras["log"]["Metrics/landing_force_mean"] = mean_landing_force
-  if command_name is not None:
-    command = env.command_manager.get_command(command_name)
-    if command is not None:
-      active = is_standing_env(env, command_name) < 0.5
-      cost = cost * active
-  return cost
+    """Penalize high impact forces at landing to encourage soft footfalls."""
+    contact_sensor: ContactSensor = env.scene[sensor_name]
+    sensor_data = contact_sensor.data
+    assert sensor_data.force is not None
+    forces = sensor_data.force  # [B, N, 3]
+    force_magnitude = torch.norm(forces, dim=-1)  # [B, N]
+    first_contact = contact_sensor.compute_first_contact(dt=env.step_dt)  # [B, N]
+    landing_impact = force_magnitude * first_contact.float()  # [B, N]
+    cost = torch.sum(landing_impact, dim=1)  # [B]
+    num_landings = torch.sum(first_contact.float())
+    mean_landing_force = torch.sum(landing_impact) / torch.clamp(num_landings, min=1)
+    env.extras["log"]["Metrics/landing_force_mean"] = mean_landing_force
+    if command_name is not None:
+        command = env.command_manager.get_command(command_name)
+        if command is not None:
+            active = is_standing_env(env, command_name) < 0.5
+            cost = cost * active
+    return cost
+
 
 class amp_reward:
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
@@ -605,13 +615,12 @@ class amp_reward:
             self.cache = cache
         return self.cache
 
-
     def __call__(self, env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg, history_length: int) -> torch.Tensor:
         if not hasattr(env, "amp_optimizer"):
             raise RuntimeError("AMP reward is configured but env.amp_optimizer is missing")
         if self.amp_optimizer is None:
             self.amp_optimizer = getattr(env, "amp_optimizer")
-        
+
         assert self.amp_optimizer is not None, "AMP optimizer is not set in the environment"
 
         del asset_cfg, history_length
@@ -619,14 +628,14 @@ class amp_reward:
         cache.update()
 
         return self.amp_optimizer.calculate_amp_rewards(cache.history).squeeze(-1)
-    
+
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         cache = self._cache(self.env)
         if env_ids is None:
             cache.reset()
         else:
             cache.reset(env_ids)
-        
+
 
 def make_reward_cfg(
     *,
@@ -635,6 +644,10 @@ def make_reward_cfg(
     arm_default_pose: bool = False,
 ) -> dict[str, RewardTermCfg]:
     rewards = {
+        "survival": RewardTermCfg(
+            func=mdp.is_alive,
+            weight=2,
+        ),
         "upright": RewardTermCfg(
             func=mdp.upright,
             weight=0.2,
@@ -658,7 +671,7 @@ def make_reward_cfg(
         ),
         "low_base_height": RewardTermCfg(
             func=base_height_below_l2,
-            weight=-10.0,
+            weight=-50.0,
             params={"threshold": 0.48},
         ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
@@ -669,19 +682,19 @@ def make_reward_cfg(
         ),
         "non_feet_ground_contact": RewardTermCfg(
             func=contact_any,
-            weight=-1.0,
+            weight=-5.0,
             params={"sensor_name": "non_feet_ground_contact"},
         ),
         # "electrical_power_cost": RewardTermCfg(
-        #     func=mdp.electrical_power_cost, 
+        #     func=mdp.electrical_power_cost,
         #     weight=-0.003,
         #     params={
         #         "asset_cfg": SceneEntityCfg("robot", joint_names=(
-        #             "Left_Hip_Pitch", "Right_Hip_Pitch", 
-        #             "Left_Hip_Roll", "Right_Hip_Roll", 
-        #             "Left_Hip_Yaw", "Right_Hip_Yaw", 
-        #             "Left_Knee_Pitch", "Right_Knee_Pitch", 
-        #             "Left_Ankle_Pitch", "Right_Ankle_Pitch", 
+        #             "Left_Hip_Pitch", "Right_Hip_Pitch",
+        #             "Left_Hip_Roll", "Right_Hip_Roll",
+        #             "Left_Hip_Yaw", "Right_Hip_Yaw",
+        #             "Left_Knee_Pitch", "Right_Knee_Pitch",
+        #             "Left_Ankle_Pitch", "Right_Ankle_Pitch",
         #             "Left_Ankle_Roll", "Right_Ankle_Roll"
         #         )),
         #     },
