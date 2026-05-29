@@ -54,7 +54,7 @@ def make_termination_cfg() -> dict[str, TerminationTermCfg]:
         "bad_base_height": TerminationTermCfg(
             func=delayed_bad_base_height, 
             params={
-                "minimum_height": 0.2,
+                "minimum_height": 0.3,
                 "asset_cfg": SceneEntityCfg("robot")
             },
         ),

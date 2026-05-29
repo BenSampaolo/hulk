@@ -115,8 +115,8 @@ def make_commands_cfg() -> dict[str, CommandTermCfg]:
             rel_dribble_envs=0.0,
             debug_vis=True,
             ranges=KickCommandCfg.Ranges(
-                walking_lin_vel_x=(-1.5, 3.0),
-                walking_lin_vel_y=(-1.5, 1.5),
+                walking_lin_vel_x=(-1.0, 2.0),
+                walking_lin_vel_y=(-1.0, 1.0),
                 walking_ang_vel_z=(-2.0, 2.0),
                 dribble_lin_vel_x=(-0.5, 0.5),
                 dribble_lin_vel_y=(-0.5, 0.5),

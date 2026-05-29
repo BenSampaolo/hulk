@@ -682,7 +682,7 @@ def make_reward_cfg(
         ),
         "non_feet_ground_contact": RewardTermCfg(
             func=contact_any,
-            weight=-5.0,
+            weight=-1.0,
             params={"sensor_name": "non_feet_ground_contact"},
         ),
         # "electrical_power_cost": RewardTermCfg(
@@ -704,7 +704,7 @@ def make_reward_cfg(
         "torque_l2": RewardTermCfg(func=mdp.joint_torques_l2, weight=-1.0e-5),
         "velocity_tracking": RewardTermCfg(
             func=TrackLinearVelocityMean,
-            weight=1.0,
+            weight=2.0,
             params={
                 "command_name": "twist",
                 "std": math.sqrt(0.4),
@@ -713,7 +713,7 @@ def make_reward_cfg(
         ),
         "velocity_tracking_ang": RewardTermCfg(
             func=TrackAngularVelocityMean,
-            weight=1.0,
+            weight=2.0,
             params={
                 "command_name": "twist",
                 "std": math.sqrt(0.4),
@@ -722,7 +722,7 @@ def make_reward_cfg(
         ),
         "air_time": RewardTermCfg(
             func=mdp.feet_air_time,
-            weight=0.4,
+            weight=0.1,
             params={
                 "sensor_name": "feet_ground_contact",
                 "threshold_min": 0.05,
