@@ -284,25 +284,31 @@ def obs_push_force(env, asset_cfg: SceneEntityCfg) -> torch.Tensor:
         device = getattr(env, "device", "cpu")
         return torch.zeros((num_envs, num_bodies * 3), device=device)
 
-    # Keep only force components (Fx, Fy, Fz), not torques.
-    forces = wrench[..., :3]
+    # Keep only force components (Fx, Fy, Fz), not torques. MuJoCo external
+    # wrenches are world-frame; the symmetry spec expects body-frame vectors.
+    forces_w = wrench[..., :3]
     body_ids = asset_cfg.body_ids
 
-    if forces.ndim == 3:
+    if forces_w.ndim == 3:
         # (num_envs, num_bodies, 3)
         if body_ids is not None:
-            forces = forces[:, body_ids, :]
-        return forces.reshape(forces.shape[0], -1)
+            forces_w = forces_w[:, body_ids, :]
+        root_quat_inv = quat_inv(asset.data.root_link_quat_w).unsqueeze(1)
+        root_quat_inv = root_quat_inv.expand(-1, forces_w.shape[1], -1)
+        forces_b = quat_apply(root_quat_inv.reshape(-1, 4), forces_w.reshape(-1, 3))
+        return forces_b.reshape(forces_w.shape[0], -1)
 
-    if forces.ndim == 2:
+    if forces_w.ndim == 2:
         # (num_bodies, 3) -> single-env fallback
         if body_ids is not None:
-            forces = forces[body_ids, :]
-        return forces.reshape(1, -1)
+            forces_w = forces_w[body_ids, :]
+        root_quat_inv = quat_inv(asset.data.root_link_quat_w[:1]).expand(forces_w.shape[0], -1)
+        forces_b = quat_apply(root_quat_inv, forces_w)
+        return forces_b.reshape(1, -1)
 
     # Unexpected shape; fall back to zeros for stability.
     num_envs = int(getattr(env, "num_envs", 1))
-    device = getattr(forces, "device", getattr(env, "device", "cpu"))
+    device = getattr(forces_w, "device", getattr(env, "device", "cpu"))
     return torch.zeros((num_envs, 3), device=device)
 
 def last_last_action(env: ManagerBasedRlEnv) -> torch.Tensor:
