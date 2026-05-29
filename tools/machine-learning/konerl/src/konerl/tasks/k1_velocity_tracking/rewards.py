@@ -667,6 +667,11 @@ def make_reward_cfg(
             weight=-1.0,
             params={"sensor_name": "self_collision"},
         ),
+        "non_feet_ground_contact": RewardTermCfg(
+            func=contact_any,
+            weight=-1.0,
+            params={"sensor_name": "non_feet_ground_contact"},
+        ),
         # "electrical_power_cost": RewardTermCfg(
         #     func=mdp.electrical_power_cost, 
         #     weight=-0.003,

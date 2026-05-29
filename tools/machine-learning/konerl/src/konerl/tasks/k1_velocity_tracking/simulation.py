@@ -110,6 +110,22 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"], *, control_a
         reduce="none",
         num_slots=1,
     )
+    non_feet_ground_cfg = ContactSensorCfg(
+        name="non_feet_ground_contact",
+        primary=ContactMatch(
+            mode="geom",
+            pattern=r".*_collision.*",
+            entity="robot",
+            exclude=(r".*[Ff]oot.*",),
+        ),
+        secondary=ContactMatch(
+            mode="body",
+            pattern="terrain",
+        ),
+        fields=("found",),
+        reduce="none",
+        num_slots=1,
+    )
     robot_ball_collision_cfg = ContactSensorCfg(
         name="robot_ball_collision",
         primary=ContactMatch(mode="subtree", pattern=".*", entity="robot"),
@@ -120,7 +136,13 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"], *, control_a
     )
     return SceneCfg(
         terrain=terrain_cfg,
-        sensors=(feet_ground_cfg, self_collision_cfg, foot_height_scan_cfg, robot_ball_collision_cfg),
+        sensors=(
+            feet_ground_cfg,
+            self_collision_cfg,
+            non_feet_ground_cfg,
+            foot_height_scan_cfg,
+            robot_ball_collision_cfg,
+        ),
         entities={
             "robot": get_k1_robot_cfg(control_arms=control_arms),
             "ball": get_ball_cfg(),
