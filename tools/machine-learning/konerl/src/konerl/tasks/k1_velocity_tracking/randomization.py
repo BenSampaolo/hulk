@@ -118,7 +118,7 @@ def offset_root_state_uniform(
     asset.write_root_link_velocity_to_sim(new_vel, env_ids=env_ids)
     
 
-def make_events_cfg() -> dict[str, EventTermCfg]:
+def make_events_cfg(control_arms: bool) -> dict[str, EventTermCfg]:
     events = {
         "reset_scene": EventTermCfg(
             func=event_fns.reset_scene_to_default,
@@ -263,11 +263,15 @@ def make_events_cfg() -> dict[str, EventTermCfg]:
             func=dr.pd_gains,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(
-                    # ".*Shoulder_Pitch.*", 
-                    # ".*Shoulder_Roll.*",
-                    # ".*Elbow_Pitch.*",
-                    # ".*Elbow_Yaw.*",
+                    ".*Shoulder_Pitch.*",
+                    ".*Shoulder_Roll.*",
+                    ".*Elbow_Pitch.*",
+                    ".*Elbow_Yaw.*",
 
+                    ".*Hip_Pitch.*",
+                    ".*Hip_Yaw.*",
+                    ".*Knee_Pitch.*",
+                ) if control_arms else (
                     ".*Hip_Pitch.*",
                     ".*Hip_Yaw.*",
                     ".*Knee_Pitch.*",

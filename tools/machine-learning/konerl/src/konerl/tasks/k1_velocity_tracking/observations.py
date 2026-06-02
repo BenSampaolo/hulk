@@ -318,7 +318,7 @@ def safe_foot_contact_forces(env, sensor_name: str) -> torch.Tensor:
     obs = mdp.foot_contact_forces(env, sensor_name)
     return torch.nan_to_num(obs, nan=0.0, posinf=0.0, neginf=0.0)
 
-def make_observation_cfg(controlled_joint_names: tuple[str, ...] | None = None) -> dict[str, ObservationGroupCfg]:
+def make_observation_cfg(controlled_joint_names: tuple[str, ...] | None = None, arms: bool = False) -> dict[str, ObservationGroupCfg]:
     joint_asset_cfg = SceneEntityCfg(
         "robot",
         joint_names=controlled_joint_names,
@@ -435,8 +435,10 @@ def make_observation_cfg(controlled_joint_names: tuple[str, ...] | None = None) 
             func=obs_pd_gains,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=(
-                    # ".*Shoulder_Pitch.*", ".*Shoulder_Roll.*", ".*Elbow_Pitch.*", 
-                    # ".*Elbow_Yaw.*", 
+                    ".*Hip_Pitch.*", ".*Hip_Yaw.*", ".*Knee_Pitch.*"
+                ) if not arms else (
+                    ".*Shoulder_Pitch.*", ".*Shoulder_Roll.*", ".*Elbow_Pitch.*",
+                    ".*Elbow_Yaw.*",
                     ".*Hip_Pitch.*", ".*Hip_Yaw.*", ".*Knee_Pitch.*"
                 ))
             }

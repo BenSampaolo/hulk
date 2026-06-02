@@ -161,10 +161,11 @@ def make_velocity_env_cfg(play: bool, *, amp: bool = False, control_arms: bool =
         scene=make_scene_cfg(terrain_type, control_arms=control_arms),
         observations=make_observation_cfg(
             controlled_joint_names=K1_AMP_FULL_BODY_JOINT_NAMES if control_arms else K1_AMP_JOINT_NAMES,
+            arms=control_arms,
         ),
         actions=make_actions_cfg(),
         commands=make_commands_cfg(),
-        events=make_events_cfg(),
+        events=make_events_cfg(control_arms=control_arms),
         rewards=make_reward_cfg(
             amp=amp,
             amp_joint_names=K1_AMP_FULL_BODY_JOINT_NAMES if control_arms else K1_AMP_JOINT_NAMES,
