@@ -399,7 +399,7 @@ class TrackAngularVelocityMean:
         z_error = torch.square(self._z_command_ema - self._z_velocity_ema)
 
         return torch.where(
-            is_walking_env(env, command_name) | is_dribble_env(env, command_name),
+            is_standing_env(env, command_name) | is_walking_env(env, command_name) | is_dribble_env(env, command_name),
             torch.exp(-z_error / std**2),
             torch.zeros_like(z_error),
         )
@@ -669,11 +669,11 @@ def make_reward_cfg(
                 "std": math.sqrt(0.3),
             },
         ),
-        "low_base_height": RewardTermCfg(
-            func=base_height_below_l2,
-            weight=-50.0,
-            params={"threshold": 0.48},
-        ),
+        # "low_base_height": RewardTermCfg(
+        #     func=base_height_below_l2,
+        #     weight=-50.0,
+        #     params={"threshold": 0.48},
+        # ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
         "self_collision": RewardTermCfg(
             func=contact_any,
