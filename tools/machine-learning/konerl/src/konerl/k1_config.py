@@ -21,6 +21,16 @@ K1_ARM_JOINT_NAMES: tuple[str, ...] = (
     "Right_Elbow_Yaw",
 )
 
+K1_REMOVED_COLLIDER_NAMES: tuple[str, ...] = (
+    "Trunk_collision0",
+    "Left_Arm_2_collision0",
+    "Left_Arm_3_collision",
+    "Left_Arm_4_collision",
+    "Right_Arm_2_collision0",
+    "Right_Arm_3_collision0",
+    "Right_Arm_4_collision",
+)
+
 K1_DEFAULT_JOINT_POS: dict[str, float] = {
     "ALeft_Shoulder_Pitch": 0.25,
     "Left_Shoulder_Roll": -1.4,
@@ -88,12 +98,21 @@ def _bake_default_arm_pose(spec: mujoco.MjSpec) -> None:
         _bake_joint_pose_into_body(spec, joint_name, K1_DEFAULT_JOINT_POS[joint_name])
 
 
+def _delete_configured_colliders(spec: mujoco.MjSpec) -> None:
+    spec_any = cast(Any, spec)
+    for geom_name in K1_REMOVED_COLLIDER_NAMES:
+        geom = spec_any.geom(geom_name)
+        if geom is not None:
+            spec.delete(geom)  # type: ignore[attr-defined]
+
+
 def get_spec(*, control_arms: bool = False) -> mujoco.MjSpec:
     spec = mujoco.MjSpec.from_file(str(K1_XML))
     for geom in tuple(spec.geoms):
         if geom.name == "ground":
             spec.delete(geom)  # type: ignore[attr-defined]
             break
+    _delete_configured_colliders(spec)
     if not control_arms:
         # XML zero is a neutral T-pose. Bake the configured K1 default arm pose
         # before welding out arm joints for leg-only policies.
