@@ -482,6 +482,71 @@ def ball_approach_alignment(
     return alignment_score * active
 
 
+def kick_foot_proximity(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    std: float = 0.35,
+) -> torch.Tensor:
+    """Dense kick shaping: bring either foot close to the ball in kick mode."""
+    robot: Entity = env.scene[robot_cfg.name]
+    ball: Entity = env.scene[ball_cfg.name]
+    foot_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids, :]
+    ball_pos_w = ball.data.root_link_pos_w[:, None, :]
+    distances = torch.linalg.norm(foot_pos_w - ball_pos_w, dim=-1)
+    min_distance = torch.min(distances, dim=1).values
+    reward = torch.exp(-torch.square(min_distance) / std**2)
+    active = is_kicking_env(env, command_name).float()
+
+    if "log" in env.extras:
+        active_count = active.sum().clamp(min=1.0)
+        env.extras["log"]["Metrics/kick_min_foot_ball_distance"] = (min_distance * active).sum() / active_count
+
+    return reward * active
+
+
+def kick_foot_velocity_towards_ball(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    proximity_std: float = 0.45,
+    min_command_speed: float = 0.1,
+) -> torch.Tensor:
+    """Dense kick shaping: swing a nearby foot along the commanded kick direction."""
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+    robot: Entity = env.scene[robot_cfg.name]
+    ball: Entity = env.scene[ball_cfg.name]
+
+    command_b = command[:, 3:6].clone()
+    command_b[:, 2] = 0.0
+    command_speed = torch.linalg.norm(command_b, dim=-1).clamp(min=min_command_speed)
+    command_dir_b = command_b / command_speed.unsqueeze(-1)
+
+    foot_vel_w = robot.data.site_lin_vel_w[:, robot_cfg.site_ids, :]
+    root_quat_inv = quat_inv(robot.data.root_link_quat_w).unsqueeze(1).expand(-1, foot_vel_w.shape[1], -1)
+    foot_vel_b = quat_apply(root_quat_inv.reshape(-1, 4), foot_vel_w.reshape(-1, 3)).reshape_as(foot_vel_w)
+    projected_speed = torch.sum(foot_vel_b * command_dir_b[:, None, :], dim=-1).clamp(min=0.0)
+
+    foot_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids, :]
+    ball_pos_w = ball.data.root_link_pos_w[:, None, :]
+    distances = torch.linalg.norm(foot_pos_w - ball_pos_w, dim=-1)
+    proximity = torch.exp(-torch.square(distances) / proximity_std**2)
+    per_foot_reward = (projected_speed / command_speed[:, None]).clamp(max=1.0) * proximity
+    reward = torch.max(per_foot_reward, dim=1).values
+    active = is_kicking_env(env, command_name).float()
+
+    if "log" in env.extras:
+        active_count = active.sum().clamp(min=1.0)
+        env.extras["log"]["Metrics/kick_foot_projected_speed"] = (
+            torch.max(projected_speed, dim=1).values * active
+        ).sum() / active_count
+
+    return reward * active
+
+
 def feet_air_time(
     env: ManagerBasedRlEnv,
     sensor_name: str,
@@ -770,16 +835,34 @@ def make_reward_cfg(
         ),
         "kick_ready_distance": RewardTermCfg(
             func=distance_to_ball_reward,
-            weight=1.0,
+            weight=0.75,
             params={
                 "command_name": "twist",
                 "target_distance": 0.4,
                 "std": 0.25,
             },
         ),
+        "kick_foot_proximity": RewardTermCfg(
+            func=kick_foot_proximity,
+            weight=1.0,
+            params={
+                "command_name": "twist",
+                "robot_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+                "std": 0.35,
+            },
+        ),
+        "kick_foot_velocity": RewardTermCfg(
+            func=kick_foot_velocity_towards_ball,
+            weight=2.0,
+            params={
+                "command_name": "twist",
+                "robot_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+                "proximity_std": 0.45,
+            },
+        ),
         "kick_contact": RewardTermCfg(
             func=kick_contact_reward,
-            weight=3.0,
+            weight=4.0,
             params={
                 "command_name": "twist",
                 "sensor_name": "robot_ball_collision",
@@ -787,12 +870,12 @@ def make_reward_cfg(
         ),
         "kick_velocity": RewardTermCfg(
             func=KickVelocityReward,
-            weight=5.0,
+            weight=8.0,
             params={
                 "command_name": "twist",
                 "sensor_name": "robot_ball_collision",
                 "std": 0.75,
-                "reward_window_steps": 20,
+                "reward_window_steps": 30,
             },
         ),
     }

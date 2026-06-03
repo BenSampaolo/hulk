@@ -182,10 +182,13 @@ class KickCommand(CommandTerm):
 
         kick_magnitudes = sample_uniform(self.cfg.ranges.kick_vel)
         kick_lateral = sample_uniform(self.cfg.ranges.kick_lateral_offset)
-        kick_directions = torch.nn.functional.normalize(
+        kick_elevation = sample_uniform(self.cfg.ranges.kick_elevation)
+        kick_horizontal = torch.nn.functional.normalize(
             torch.stack((torch.ones_like(kick_lateral), kick_lateral, torch.zeros_like(kick_lateral)), dim=1),
             dim=1,
         )
+        kick_directions = kick_horizontal * torch.cos(kick_elevation).unsqueeze(-1)
+        kick_directions[:, 2] = torch.sin(kick_elevation)
         self.kick_direction_command_b[env_ids] = torch.where(
             self.is_kicking_env[env_ids].unsqueeze(-1),
             kick_magnitudes.unsqueeze(-1) * kick_directions,
@@ -237,9 +240,11 @@ class KickCommand(CommandTerm):
             self._clamp(target_angle * self.cfg.approach_yaw_stiffness, self.cfg.ranges.approach_ang_vel_z),
             self.vel_command_b[env_ids, 2],
         )
+        target_direction_b = ball_pos_b.clone()
+        target_direction_b[:, 2] = 0.0
         self.kick_direction_command_b[env_ids] = torch.where(
             approach.unsqueeze(-1),
-            ball_pos_b,
+            target_direction_b,
             self.kick_direction_command_b[env_ids],
         )
 
@@ -550,6 +555,7 @@ class KickCommandCfg(CommandTermCfg):
         approach_ang_vel_z: tuple[float, float] = (-1.5, 1.5)
         kick_vel: tuple[float, float] = (0.8, 2.5)
         kick_lateral_offset: tuple[float, float] = (-0.2, 0.2)
+        kick_elevation: tuple[float, float] = (0.0, math.pi / 4.0)
         gait_frequency: tuple[float, float] = (1.0, 2.0)  # steps per second
     
     ranges: Ranges

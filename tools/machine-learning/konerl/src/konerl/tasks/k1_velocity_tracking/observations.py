@@ -356,6 +356,14 @@ def make_observation_cfg(controlled_joint_names: tuple[str, ...] | None = None, 
         "actions": ObservationTermCfg(
             func=mdp.last_action,
         ),
+        "ball_pos": ObservationTermCfg(
+            func=obs_ball_pos_heading_frame,
+            params={"outside_info": True},
+        ),
+        "ball_vel": ObservationTermCfg(
+            func=obs_ball_vel_heading_frame,
+            params={"outside_info": True},
+        ),
         "command": ObservationTermCfg(
             func=mdp.generated_commands,
             params={"command_name": "twist"},
@@ -386,6 +394,14 @@ def make_observation_cfg(controlled_joint_names: tuple[str, ...] | None = None, 
         ),
         "prev_prev_actions": ObservationTermCfg(
             func=last_last_action,
+        ),
+        "ball_pos": ObservationTermCfg(
+            func=obs_ball_pos_heading_frame,
+            params={"outside_info": True},
+        ),
+        "ball_vel": ObservationTermCfg(
+            func=obs_ball_vel_heading_frame,
+            params={"outside_info": True},
         ),
         "command": ObservationTermCfg(
             func=mdp.generated_commands,
