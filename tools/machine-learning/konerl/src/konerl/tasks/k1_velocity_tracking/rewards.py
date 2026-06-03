@@ -185,6 +185,20 @@ def is_standing_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torc
     return standing_env_flag
 
 
+def is_approach_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
+    command = env.command_manager.get_term(command_name)
+    assert command is not None
+    approach_env_flag = getattr(command, "is_approach_env", None)
+    if approach_env_flag is not None:
+        return approach_env_flag
+    command_tensor = env.command_manager.get_command(command_name)
+    assert command_tensor is not None
+    ball_free = command_tensor[:, 6] > 0.5
+    kick = command_tensor[:, 7] > 0.5
+    dribble = command_tensor[:, 8] > 0.5
+    return ball_free & ~kick & ~dribble
+
+
 def distance_to_ball_reward(
     env: ManagerBasedRlEnv,
     command_name: str = "twist",
@@ -193,7 +207,7 @@ def distance_to_ball_reward(
     target_distance: float = 0.4,
     std: float = 0.25,
 ) -> torch.Tensor:
-    """Rewards maintaining an exact distance to the ball when the ball is not free."""
+    """Rewards maintaining a useful base distance to the ball for approach/kick setup."""
     robot: Entity = env.scene[robot_cfg.name]
     assert robot is not None
     ball: Entity = env.scene[ball_cfg.name]
@@ -203,7 +217,6 @@ def distance_to_ball_reward(
     assert command is not None
 
     can_touch = command[:, 6] > 0.5
-    not_free = ~can_touch
 
     ball_pos = ball.data.root_link_pos_w[:, :2]
     robot_pos = robot.data.root_link_pos_w[:, :2]
@@ -213,7 +226,7 @@ def distance_to_ball_reward(
     proximity = torch.exp(-error / std**2)
     reward = torch.zeros_like(proximity)
 
-    active = (is_kicking_env(env, command_name) | is_dribble_env(env, command_name)) & not_free
+    active = (is_approach_env(env, command_name) | is_kicking_env(env, command_name)) & can_touch
     return torch.where(active, proximity, reward)
 
 
@@ -228,7 +241,7 @@ def kick_contact_reward(
     assert command is not None
 
     can_touch = command[:, 6] > 0.5
-    active = is_kicking_env(env, command_name) | is_dribble_env(env, command_name)
+    active = is_kicking_env(env, command_name)
     contact = ((sensor.data.found[:, 0] > 0.5) & active).float()
 
     return torch.where(can_touch, contact, -contact)
@@ -242,13 +255,16 @@ class KickVelocityReward:
     ):
         self.env = env
         self.cfg = cfg
-        self.active: torch.Tensor = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+        self.remaining_steps = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+        self.latched_command_b = torch.zeros(env.num_envs, 3, dtype=torch.float, device=env.device)
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
-            self.active.fill_(0.0)
+            self.remaining_steps.fill_(0.0)
+            self.latched_command_b.fill_(0.0)
         else:
-            self.active[env_ids] = 0.0
+            self.remaining_steps[env_ids] = 0.0
+            self.latched_command_b[env_ids] = 0.0
 
     def __call__(
         self,
@@ -257,9 +273,11 @@ class KickVelocityReward:
         robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
         ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
         sensor_name: str = "robot_ball_collision",
-        std: float = 5.0,
+        std: float = 0.75,
+        reward_window_steps: int = 20,
+        min_command_speed: float = 0.1,
     ) -> torch.Tensor:
-        "Rewards the ball's velocity in the commanded direction when contact is made during a kick"
+        "Rewards ball speed along the kick command for several frames after kick contact."
         sensor = env.scene.sensors[sensor_name]
         assert sensor is not None
         command = env.command_manager.get_command(command_name)
@@ -271,21 +289,36 @@ class KickVelocityReward:
 
         can_touch = command[:, 6] > 0.5
         active = is_kicking_env(env, command_name) & can_touch
-        contact = (sensor.data.found[:, 0] > 0.5) & active
+        command_b = command[:, 3:6]
+        command_speed = torch.linalg.norm(command_b, dim=-1)
+        contact = (sensor.data.found[:, 0] > 0.5) & active & (command_speed > min_command_speed)
 
-        self.active = torch.where(contact, torch.ones_like(self.active) * 5, (self.active - 1.0).clamp(min=-1.0))
+        self.latched_command_b = torch.where(contact.unsqueeze(-1), command_b, self.latched_command_b)
+        self.remaining_steps = torch.where(
+            contact,
+            torch.full_like(self.remaining_steps, float(reward_window_steps)),
+            (self.remaining_steps - 1.0).clamp(min=0.0),
+        )
 
-        trunk_quat_w = robot.data.root_link_quat_w
-        ball_vel_w = ball.data.root_link_vel_w[:, :3]
-
-        yaw = get_yaw_from_quaternion(trunk_quat_w)
+        yaw = get_yaw_from_quaternion(robot.data.root_link_quat_w)
         yaw_only_quat_w = quat_from_yaw(yaw)
+        ball_vel_heading = quat_apply(quat_inv(yaw_only_quat_w), ball.data.root_link_vel_w[:, :3])
 
-        ball_vel_heading = quat_apply(quat_inv(yaw_only_quat_w), ball_vel_w)
+        latched_speed = torch.linalg.norm(self.latched_command_b, dim=-1).clamp(min=min_command_speed)
+        latched_dir = self.latched_command_b / latched_speed.unsqueeze(-1)
+        projected_speed = torch.sum(ball_vel_heading * latched_dir, dim=-1).clamp(min=0.0)
+        speed_error = projected_speed - latched_speed
+        speed_gate = (projected_speed / latched_speed).clamp(min=0.0, max=1.0)
+        reward = torch.exp(-torch.square(speed_error) / std**2) * speed_gate
 
-        error = torch.norm(ball_vel_heading - command[:, 3:6], dim=-1)
+        active_window = self.remaining_steps > 0.0
+        if "log" in env.extras:
+            active_count = active_window.float().sum().clamp(min=1.0)
+            env.extras["log"]["Metrics/kick_projected_ball_speed"] = (
+                projected_speed * active_window.float()
+            ).sum() / active_count
 
-        return torch.exp(-error / std**2) * (self.active > 0.0).float()
+        return reward * active_window.float()
 
 
 class TrackLinearVelocityMean:
@@ -318,31 +351,11 @@ class TrackLinearVelocityMean:
         ema_alpha: float = 0.8,
         std: float = 0.25,
     ) -> torch.Tensor:
-        ball: Entity = env.scene["ball"]
-        assert ball is not None
-        robot: Entity = env.scene["robot"]
-        assert robot is not None
         command = env.command_manager.get_command(command_name)
         assert command is not None
 
-        trunk_pos_w = robot.data.root_link_pos_w
-        trunk_quat_w = robot.data.root_link_quat_w
-        ball_pos_w = ball.data.root_link_pos_w
-
-        rel_pos_w = ball_pos_w - trunk_pos_w
-
-        yaw = get_yaw_from_quaternion(trunk_quat_w)
-        yaw_only_quat_w = quat_from_yaw(yaw)
-
-        ball_pos_heading = quat_apply(quat_inv(yaw_only_quat_w), rel_pos_w)
         self._xy_command_ema *= 1 - ema_alpha
-
-        # Chooses the command based on the env type
-        self._xy_command_ema += torch.where(
-            is_kicking_env(env, command_name).unsqueeze(-1),
-            ema_alpha * torch.linalg.norm(ball_pos_heading[:, :2], dim=-1, keepdim=True),
-            ema_alpha * command[:, :2],
-        )
+        self._xy_command_ema += ema_alpha * command[:, :2]
 
         asset: Entity = env.scene[self._asset_cfg.name]
         xy_velocity = asset.data.root_link_lin_vel_b[:, :2]
@@ -462,7 +475,7 @@ def ball_approach_alignment(
 
     angle_to_ball = torch.atan2(relative_pos_b[:, 1], relative_pos_b[:, 0])
 
-    active = is_dribble_env(env, command_name) | is_kicking_env(env, command_name)
+    active = is_approach_env(env, command_name) | is_kicking_env(env, command_name)
 
     alignment_score = 1.0 - (abs(angle_to_ball) / torch.pi)
 
@@ -748,6 +761,38 @@ def make_reward_cfg(
                 "sensor_name": "feet_ground_contact",
                 "command_name": "twist",
                 "command_threshold": 0.05,
+            },
+        ),
+        "ball_approach_alignment": RewardTermCfg(
+            func=ball_approach_alignment,
+            weight=0.5,
+            params={"command_name": "twist"},
+        ),
+        "kick_ready_distance": RewardTermCfg(
+            func=distance_to_ball_reward,
+            weight=1.0,
+            params={
+                "command_name": "twist",
+                "target_distance": 0.4,
+                "std": 0.25,
+            },
+        ),
+        "kick_contact": RewardTermCfg(
+            func=kick_contact_reward,
+            weight=3.0,
+            params={
+                "command_name": "twist",
+                "sensor_name": "robot_ball_collision",
+            },
+        ),
+        "kick_velocity": RewardTermCfg(
+            func=KickVelocityReward,
+            weight=5.0,
+            params={
+                "command_name": "twist",
+                "sensor_name": "robot_ball_collision",
+                "std": 0.75,
+                "reward_window_steps": 20,
             },
         ),
     }

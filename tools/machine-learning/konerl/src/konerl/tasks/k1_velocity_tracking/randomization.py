@@ -145,8 +145,8 @@ def make_events_cfg(control_arms: bool) -> dict[str, EventTermCfg]:
             func=event_fns.reset_root_state_uniform,
             mode="reset",
             params={
-                "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (0.05, 0.1)},
-                "velocity_range": {"x": (-2.0, 2.0), "y": (-2.0, 2.0), "z": (-0.15, 0.5)},
+                "pose_range": {"x": (0.35, 1.2), "y": (-0.35, 0.35), "z": (0.05, 0.1)},
+                "velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1), "z": (-0.05, 0.05)},
                 "asset_cfg": SceneEntityCfg("ball")
             },
         ),
@@ -154,11 +154,11 @@ def make_events_cfg(control_arms: bool) -> dict[str, EventTermCfg]:
             func=ResetRootStateUniformOnContact,
             mode="step",
             params={
-                "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (0.05, 0.1)},
-                "velocity_range": {"x": (-2.0, 2.0), "y": (-2.0, 2.0), "z": (-0.15, 0.5)},
+                "pose_range": {"x": (0.35, 1.2), "y": (-0.35, 0.35), "z": (0.05, 0.1)},
+                "velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1), "z": (-0.05, 0.05)},
                 "ball_cfg": SceneEntityCfg("ball"),
                 "sensor_name": "robot_ball_collision",
-                "delay_frames": 5
+                "delay_frames": 250
             },
         ),
         "teleport_ball": EventTermCfg(
@@ -167,8 +167,8 @@ def make_events_cfg(control_arms: bool) -> dict[str, EventTermCfg]:
             interval_range_s=(10.0, 30.0),
             min_step_count_between_reset=500,
             params={
-                "pose_range": {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "z": (0.05, 0.1)},
-                "velocity_range": {"x": (-2.0, 2.0), "y": (-2.0, 2.0), "z": (-0.15, 0.5)},
+                "pose_range": {"x": (0.35, 1.2), "y": (-0.35, 0.35), "z": (0.05, 0.1)},
+                "velocity_range": {"x": (-0.2, 0.2), "y": (-0.2, 0.2), "z": (-0.05, 0.1)},
                 "asset_cfg": SceneEntityCfg("ball")
             },
         ),

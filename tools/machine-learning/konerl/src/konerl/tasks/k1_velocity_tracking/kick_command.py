@@ -10,7 +10,7 @@ import torch
 
 from mjlab.entity import Entity
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
-from mjlab.utils.lab_api.math import matrix_from_quat
+from mjlab.utils.lab_api.math import matrix_from_quat, quat_apply, quat_inv
 
 if TYPE_CHECKING:
   import viser
@@ -39,9 +39,17 @@ class KickCommand(CommandTerm):
     def __init__(self, cfg: KickCommandCfg, env: ManagerBasedRlEnv):
         super().__init__(cfg, env)
 
-        total_frac = self.cfg.rel_dribble_envs + self.cfg.rel_kick_envs + self.cfg.rel_standing_envs + self.cfg.rel_walk_envs
+        total_frac = (
+            self.cfg.rel_approach_envsPleas
+            + self.cfg.rel_kick_envs
+            + self.cfg.rel_walk_envs
+            + self.cfg.rel_standing_envs
+            + self.cfg.rel_dribble_envs
+        )
         if not math.isclose(total_frac, 1.0, rel_tol=1e-5):
-            raise ValueError(f"The sum of environment type fractions must be 1.0, got {total_frac}")
+            raise ValueError(f"The sum of command mode fractions must be 1.0, got {total_frac}")
+        if not math.isclose(self.cfg.rel_dribble_envs, 0.0, abs_tol=1e-8):
+            raise ValueError("Dribbling is disabled for the minimal kick curriculum")
 
         self.robot: Entity = env.scene[cfg.entity_name]
         self.ball: Entity = env.scene[cfg.ball_name]
@@ -63,6 +71,7 @@ class KickCommand(CommandTerm):
             self.num_envs, dtype=torch.bool, device=self.device
         )
         self.is_walking_env = torch.zeros_like(self.is_standing_env)
+        self.is_approach_env = torch.zeros_like(self.is_standing_env)
         self.is_kicking_env = torch.zeros_like(self.is_standing_env)
         self.is_dribble_env = torch.zeros_like(self.is_standing_env)
 
@@ -130,24 +139,27 @@ class KickCommand(CommandTerm):
             return torch.empty(num_env_ids, device=self.device).uniform_(*range_)
 
         cumulative_fractions = torch.tensor([
-            self.cfg.rel_dribble_envs,
-            self.cfg.rel_dribble_envs + self.cfg.rel_kick_envs,
-            self.cfg.rel_dribble_envs + self.cfg.rel_kick_envs + self.cfg.rel_standing_envs,
+            self.cfg.rel_approach_envs,
+            self.cfg.rel_approach_envs + self.cfg.rel_kick_envs,
+            self.cfg.rel_approach_envs + self.cfg.rel_kick_envs + self.cfg.rel_walk_envs,
         ], device=self.device)
 
         rand_vals = torch.empty(num_env_ids, device=self.device).uniform_(0.0, 1.0)
 
-        self.is_dribble_env[env_ids] = rand_vals < cumulative_fractions[0]
+        self.is_approach_env[env_ids] = rand_vals < cumulative_fractions[0]
         self.is_kicking_env[env_ids] = (rand_vals >= cumulative_fractions[0]) & (rand_vals < cumulative_fractions[1])
-        self.is_standing_env[env_ids] = (rand_vals >= cumulative_fractions[1]) & (rand_vals < cumulative_fractions[2])
-        self.is_walking_env[env_ids] = rand_vals >= cumulative_fractions[2] 
+        self.is_walking_env[env_ids] = (rand_vals >= cumulative_fractions[1]) & (rand_vals < cumulative_fractions[2])
+        self.is_standing_env[env_ids] = rand_vals >= cumulative_fractions[2]
+        self.is_dribble_env[env_ids] = False
 
-        # Assign gait frequency based on env type. Walking gets frequency, standing gets 0.
-        # Dribbling and kicking might also want a gait frequency if they involve movement.
-        is_moving = self.is_walking_env[env_ids] | self.is_dribble_env[env_ids] | self.is_kicking_env[env_ids]
-        
+        self.vel_command_b[env_ids] = 0.0
+        self.vel_command_w[env_ids] = 0.0
+        self.kick_direction_command_b[env_ids] = 0.0
+        self.kick_direction_command_w[env_ids] = 0.0
+
+        is_gaiting = self.is_approach_env[env_ids] | self.is_walking_env[env_ids]
         self.gait_frequency[env_ids] = torch.where(
-            is_moving,
+            is_gaiting,
             sample_uniform(self.cfg.ranges.gait_frequency),
             torch.zeros_like(self.gait_frequency[env_ids], device=self.device)
         )
@@ -155,74 +167,89 @@ class KickCommand(CommandTerm):
         self.vel_command_b[env_ids, 0] = torch.where(
             self.is_walking_env[env_ids],
             sample_uniform(self.cfg.ranges.walking_lin_vel_x),
-            torch.where(
-                self.is_dribble_env[env_ids],
-                sample_uniform(self.cfg.ranges.dribble_lin_vel_x),
-                torch.zeros_like(self.vel_command_b[env_ids, 0], device=self.device)
-            )
+            self.vel_command_b[env_ids, 0],
         )
         self.vel_command_b[env_ids, 1] = torch.where(
             self.is_walking_env[env_ids],
             sample_uniform(self.cfg.ranges.walking_lin_vel_y),
-            torch.where(
-                self.is_dribble_env[env_ids],
-                sample_uniform(self.cfg.ranges.dribble_lin_vel_y), 
-                torch.zeros_like(self.vel_command_b[env_ids, 1], device=self.device)
-            )
+            self.vel_command_b[env_ids, 1],
         )
         self.vel_command_b[env_ids, 2] = torch.where(
             self.is_walking_env[env_ids],
             sample_uniform(self.cfg.ranges.walking_ang_vel_z),
-            torch.where(
-                self.is_dribble_env[env_ids],
-                sample_uniform(self.cfg.ranges.dribble_ang_vel_z),
-                torch.zeros_like(self.vel_command_b[env_ids, 2], device=self.device)
-            )
+            self.vel_command_b[env_ids, 2],
         )
 
-        # This samples a random point of the upper half of the unit 
-        # sphere and scales it by the kick velocity range
-        kick_magnitudes = sample_uniform(self.cfg.ranges.kick_vel).unsqueeze(-1)
+        kick_magnitudes = sample_uniform(self.cfg.ranges.kick_vel)
+        kick_lateral = sample_uniform(self.cfg.ranges.kick_lateral_offset)
         kick_directions = torch.nn.functional.normalize(
-            torch.cat((
-                torch.randn(num_env_ids, 2, device=self.device), 
-                torch.randn(num_env_ids, 1, device=self.device).abs()
-            ), dim=1), dim=1
+            torch.stack((torch.ones_like(kick_lateral), kick_lateral, torch.zeros_like(kick_lateral)), dim=1),
+            dim=1,
         )
         self.kick_direction_command_b[env_ids] = torch.where(
             self.is_kicking_env[env_ids].unsqueeze(-1),
-            kick_magnitudes * kick_directions,
-            torch.zeros_like(self.kick_direction_command_b[env_ids], device=self.device)
+            kick_magnitudes.unsqueeze(-1) * kick_directions,
+            self.kick_direction_command_b[env_ids],
         )
 
         self.behavior_flags[env_ids] = torch.stack((
-            # Ball free 
-            torch.where( 
-                self.is_dribble_env[env_ids] | self.is_kicking_env[env_ids],
-                torch.ones_like(self.behavior_flags[env_ids][:, 0], device=self.device),
-                torch.zeros_like(self.behavior_flags[env_ids][:, 0], device=self.device)
-            ),
-            # Kick
-            torch.where(
-                self.is_kicking_env[env_ids],
-                torch.ones_like(self.behavior_flags[env_ids][:, 1], device=self.device),
-                torch.zeros_like(self.behavior_flags[env_ids][:, 1], device=self.device)
-            ),
-            # Dribble
-            torch.where(
-                self.is_dribble_env[env_ids],
-                torch.ones_like(self.behavior_flags[env_ids][:, 2], device=self.device),
-                torch.zeros_like(self.behavior_flags[env_ids][:, 2], device=self.device)
-            ),
-            torch.zeros_like(self.behavior_flags[env_ids][:, 3], device=self.device)
+            (self.is_approach_env[env_ids] | self.is_kicking_env[env_ids]).float(),
+            self.is_kicking_env[env_ids].float(),
+            torch.zeros_like(self.behavior_flags[env_ids][:, 2], device=self.device),
+            torch.zeros_like(self.behavior_flags[env_ids][:, 3], device=self.device),
         ), dim=1)
-        
+        self._update_approach_commands(env_ids)
+
+    def _ball_position_b(self, env_ids: torch.Tensor) -> torch.Tensor:
+        rel_pos_w = self.ball.data.root_link_pos_w[env_ids] - self.robot.data.root_link_pos_w[env_ids]
+        return quat_apply(quat_inv(self.robot.data.root_link_quat_w[env_ids]), rel_pos_w)
+
+    def _clamp(self, values: torch.Tensor, range_: tuple[float, float]) -> torch.Tensor:
+        return values.clamp(min=range_[0], max=range_[1])
+
+    def _update_approach_commands(self, env_ids: torch.Tensor | None = None) -> None:
+        if env_ids is None:
+            env_ids = torch.arange(self.num_envs, device=self.device)
+        if len(env_ids) == 0:
+            return
+
+        approach = self.is_approach_env[env_ids]
+        if not bool(approach.any().item()):
+            return
+
+        ball_pos_b = self._ball_position_b(env_ids)
+        distance = torch.linalg.norm(ball_pos_b[:, :2], dim=1)
+        distance_error = distance - self.cfg.approach_target_distance
+        target_angle = torch.atan2(ball_pos_b[:, 1], ball_pos_b[:, 0])
+
+        self.vel_command_b[env_ids, 0] = torch.where(
+            approach,
+            self._clamp(distance_error * self.cfg.approach_lin_stiffness, self.cfg.ranges.approach_lin_vel_x),
+            self.vel_command_b[env_ids, 0],
+        )
+        self.vel_command_b[env_ids, 1] = torch.where(
+            approach,
+            self._clamp(ball_pos_b[:, 1] * self.cfg.approach_lat_stiffness, self.cfg.ranges.approach_lin_vel_y),
+            self.vel_command_b[env_ids, 1],
+        )
+        self.vel_command_b[env_ids, 2] = torch.where(
+            approach,
+            self._clamp(target_angle * self.cfg.approach_yaw_stiffness, self.cfg.ranges.approach_ang_vel_z),
+            self.vel_command_b[env_ids, 2],
+        )
+        self.kick_direction_command_b[env_ids] = torch.where(
+            approach.unsqueeze(-1),
+            ball_pos_b,
+            self.kick_direction_command_b[env_ids],
+        )
+
     def _update_command(self) -> None:
         standing_env_ids = self.is_standing_env.nonzero(as_tuple=False).flatten()
         self.vel_command_b[standing_env_ids, :] = 0.0
         self.vel_command_w[standing_env_ids, :] = 0.0
         self.kick_direction_command_b[standing_env_ids, :] = 0.0
         self.kick_direction_command_w[standing_env_ids, :] = 0.0
+        self._update_approach_commands()
 
     def create_gui(
         self,
@@ -499,9 +526,14 @@ class KickCommandCfg(CommandTermCfg):
     ball_name: str
 
     rel_dribble_envs: float = 0.0
+    rel_approach_envs: float = 0.0
     rel_kick_envs: float = 0.0
     rel_standing_envs: float = 0.0
     rel_walk_envs: float = 0.0
+    approach_target_distance: float = 0.45
+    approach_lin_stiffness: float = 1.2
+    approach_lat_stiffness: float = 1.0
+    approach_yaw_stiffness: float = 1.5
 
     @dataclass
     class Ranges:
@@ -513,7 +545,11 @@ class KickCommandCfg(CommandTermCfg):
         dribble_lin_vel_y: tuple[float, float] = (-1.0, 1.0)
         dribble_ang_vel_z: tuple[float, float] = (-1.5, 1.5)
 
-        kick_vel: tuple[float, float] = (0.1, 5.0)
+        approach_lin_vel_x: tuple[float, float] = (-0.2, 1.0)
+        approach_lin_vel_y: tuple[float, float] = (-0.5, 0.5)
+        approach_ang_vel_z: tuple[float, float] = (-1.5, 1.5)
+        kick_vel: tuple[float, float] = (0.8, 2.5)
+        kick_lateral_offset: tuple[float, float] = (-0.2, 0.2)
         gait_frequency: tuple[float, float] = (1.0, 2.0)  # steps per second
     
     ranges: Ranges
