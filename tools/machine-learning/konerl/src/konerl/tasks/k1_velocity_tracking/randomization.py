@@ -14,6 +14,71 @@ from mjlab.utils.lab_api.math import (
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
+def _yaw_from_quat_wxyz(quat: torch.Tensor) -> torch.Tensor:
+    w, x, y, z = quat[:, 0], quat[:, 1], quat[:, 2], quat[:, 3]
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def reset_ball_relative_to_robot(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None,
+    pose_range: dict[str, tuple[float, float]],
+    velocity_range: dict[str, tuple[float, float]] | None = None,
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    refresh_robot_pose: bool = False,
+) -> None:
+    """Place the ball in the robot yaw frame and overwrite ball velocity."""
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device, dtype=torch.int64)
+
+    robot = env.scene[robot_cfg.name]
+    ball = env.scene[ball_cfg.name]
+    assert robot is not None
+    assert ball is not None
+    if refresh_robot_pose:
+        env.scene.write_data_to_sim()
+        env.sim.forward()
+
+    rel_x = sample_uniform(*pose_range.get("x", (0.0, 0.0)), env_ids.shape, device=env.device)
+    rel_y = sample_uniform(*pose_range.get("y", (0.0, 0.0)), env_ids.shape, device=env.device)
+    z_offset = sample_uniform(*pose_range.get("z", (0.0, 0.0)), env_ids.shape, device=env.device)
+
+    robot_pos_w = robot.data.root_link_pos_w[env_ids]
+    yaw = _yaw_from_quat_wxyz(robot.data.root_link_quat_w[env_ids])
+    cos_yaw = torch.cos(yaw)
+    sin_yaw = torch.sin(yaw)
+
+    ball_default_state = ball.data.default_root_state[env_ids]
+    ball_pos_w = torch.stack((
+        robot_pos_w[:, 0] + cos_yaw * rel_x - sin_yaw * rel_y,
+        robot_pos_w[:, 1] + sin_yaw * rel_x + cos_yaw * rel_y,
+        env.scene.env_origins[env_ids, 2] + ball_default_state[:, 2] + z_offset,
+    ), dim=1)
+
+    ball_quat_w = ball_default_state[:, 3:7]
+    ball.write_root_link_pose_to_sim(torch.cat((ball_pos_w, ball_quat_w), dim=-1), env_ids=env_ids)
+
+    if velocity_range is None:
+        velocity_range = {}
+    lin_vel_b = torch.stack((
+        sample_uniform(*velocity_range.get("x", (0.0, 0.0)), env_ids.shape, device=env.device),
+        sample_uniform(*velocity_range.get("y", (0.0, 0.0)), env_ids.shape, device=env.device),
+        sample_uniform(*velocity_range.get("z", (0.0, 0.0)), env_ids.shape, device=env.device),
+    ), dim=1)
+    lin_vel_w = torch.stack((
+        cos_yaw * lin_vel_b[:, 0] - sin_yaw * lin_vel_b[:, 1],
+        sin_yaw * lin_vel_b[:, 0] + cos_yaw * lin_vel_b[:, 1],
+        lin_vel_b[:, 2],
+    ), dim=1)
+    ang_vel_w = torch.stack((
+        sample_uniform(*velocity_range.get("roll", (0.0, 0.0)), env_ids.shape, device=env.device),
+        sample_uniform(*velocity_range.get("pitch", (0.0, 0.0)), env_ids.shape, device=env.device),
+        sample_uniform(*velocity_range.get("yaw", (0.0, 0.0)), env_ids.shape, device=env.device),
+    ), dim=1)
+    ball.write_root_link_velocity_to_sim(torch.cat((lin_vel_w, ang_vel_w), dim=-1), env_ids=env_ids)
+
+
 class ResetRootStateUniformOnContact:
     """Event function to reset ball after contact with the robot has been detected."""
     def __init__(
@@ -61,12 +126,12 @@ class ResetRootStateUniformOnContact:
 
         if len(local_reset_indices) > 0:
             global_reset_ids = env_ids[local_reset_indices]
-            offset_root_state_uniform(
+            reset_ball_relative_to_robot(
                 env=env,
                 env_ids=global_reset_ids,
                 pose_range=pose_range,
                 velocity_range=velocity_range,
-                asset_cfg=ball_cfg
+                ball_cfg=ball_cfg,
             )
 
 def offset_root_state_uniform(
@@ -142,12 +207,13 @@ def make_events_cfg(control_arms: bool) -> dict[str, EventTermCfg]:
             },
         ),
         "reset_ball": EventTermCfg(
-            func=event_fns.reset_root_state_uniform,
+            func=reset_ball_relative_to_robot,
             mode="reset",
             params={
                 "pose_range": {"x": (0.35, 1.2), "y": (-0.35, 0.35), "z": (0.05, 0.1)},
-                "velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1), "z": (-0.05, 0.05)},
-                "asset_cfg": SceneEntityCfg("ball")
+                "velocity_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (0.0, 0.0)},
+                "ball_cfg": SceneEntityCfg("ball"),
+                "refresh_robot_pose": True,
             },
         ),
         "reset_ball_on_contact": EventTermCfg(
@@ -155,21 +221,21 @@ def make_events_cfg(control_arms: bool) -> dict[str, EventTermCfg]:
             mode="step",
             params={
                 "pose_range": {"x": (0.35, 1.2), "y": (-0.35, 0.35), "z": (0.05, 0.1)},
-                "velocity_range": {"x": (-0.1, 0.1), "y": (-0.1, 0.1), "z": (-0.05, 0.05)},
+                "velocity_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (0.0, 0.0)},
                 "ball_cfg": SceneEntityCfg("ball"),
                 "sensor_name": "robot_ball_collision",
                 "delay_frames": 250
             },
         ),
         "teleport_ball": EventTermCfg(
-            func=offset_root_state_uniform,
+            func=reset_ball_relative_to_robot,
             mode="interval",
             interval_range_s=(10.0, 30.0),
             min_step_count_between_reset=500,
             params={
                 "pose_range": {"x": (0.35, 1.2), "y": (-0.35, 0.35), "z": (0.05, 0.1)},
-                "velocity_range": {"x": (-0.2, 0.2), "y": (-0.2, 0.2), "z": (-0.05, 0.1)},
-                "asset_cfg": SceneEntityCfg("ball")
+                "velocity_range": {"x": (-0.05, 0.05), "y": (-0.05, 0.05), "z": (0.0, 0.0)},
+                "ball_cfg": SceneEntityCfg("ball")
             },
         ),
         "push_ball": EventTermCfg(

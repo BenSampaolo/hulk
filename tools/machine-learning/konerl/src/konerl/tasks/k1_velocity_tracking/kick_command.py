@@ -40,7 +40,7 @@ class KickCommand(CommandTerm):
         super().__init__(cfg, env)
 
         total_frac = (
-            self.cfg.rel_approach_envsPleas
+            self.cfg.rel_approach_envs
             + self.cfg.rel_kick_envs
             + self.cfg.rel_walk_envs
             + self.cfg.rel_standing_envs
