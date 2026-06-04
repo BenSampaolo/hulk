@@ -1015,7 +1015,7 @@ def make_reward_cfg(
     if amp:
         rewards["amp"] = RewardTermCfg(
             func=amp_reward,
-            weight=2.0,
+            weight=2.5,
             params={
                 "asset_cfg": SceneEntityCfg("robot", joint_names=amp_joint_names),
                 "history_length": 5,
