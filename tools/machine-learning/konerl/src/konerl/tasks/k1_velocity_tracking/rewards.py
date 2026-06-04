@@ -499,6 +499,62 @@ def ball_approach_alignment(
     return alignment_score * active
 
 
+def kick_base_velocity_to_setup(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    sensor_name: str = "robot_ball_collision",
+    target_distance: float = 0.4,
+    target_speed: float = 0.45,
+    overspeed_std: float = 0.3,
+    distance_margin: float = 0.08,
+) -> torch.Tensor:
+    """Reward controlled base motion to a command-dependent kick setup pose, not into the ball."""
+    robot: Entity = env.scene[robot_cfg.name]
+    ball: Entity = env.scene[ball_cfg.name]
+    sensor = env.scene.sensors[sensor_name]
+    assert sensor is not None
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+
+    command_b = command[:, 3:6].clone()
+    command_b[:, 2] = 0.0
+    command_dir_b = command_b / torch.linalg.norm(command_b, dim=-1).clamp(min=1e-6).unsqueeze(-1)
+
+    yaw = get_yaw_from_quaternion(robot.data.root_link_quat_w)
+    yaw_only_quat_w = quat_from_yaw(yaw)
+    command_dir_w = quat_apply(yaw_only_quat_w, command_dir_b)[:, :2]
+
+    robot_pos = robot.data.root_link_pos_w[:, :2]
+    ball_pos = ball.data.root_link_pos_w[:, :2]
+    setup_pos = ball_pos - command_dir_w * target_distance
+    to_setup = setup_pos - robot_pos
+    setup_error = torch.linalg.norm(to_setup, dim=-1)
+    setup_dir = to_setup / setup_error.clamp(min=1e-6).unsqueeze(-1)
+
+    robot_vel = robot.data.root_link_vel_w[:, :2]
+    projected_speed = torch.sum(robot_vel * setup_dir, dim=-1).clamp(min=0.0)
+    speed_up_reward = (projected_speed / target_speed).clamp(max=1.0)
+    overspeed_penalty = torch.exp(-torch.square((projected_speed - target_speed).clamp(min=0.0)) / overspeed_std**2)
+    reward = speed_up_reward * overspeed_penalty
+
+    active = (
+        is_kicking_env(env, command_name)
+        & (command[:, 6] > 0.5)
+        & (sensor.data.found[:, 0] <= 0.5)
+        & (setup_error > distance_margin)
+    )
+    active_f = active.float()
+
+    if "log" in env.extras:
+        active_count = active_f.sum().clamp(min=1.0)
+        env.extras["log"]["Metrics/kick_base_projected_speed"] = (projected_speed * active_f).sum() / active_count
+        env.extras["log"]["Metrics/kick_base_setup_error"] = (setup_error * active_f).sum() / active_count
+
+    return reward * active_f
+
+
 class KickFootProgressReward:
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
         self.best_distance = torch.full((env.num_envs,), float("inf"), dtype=torch.float, device=env.device)
@@ -568,8 +624,7 @@ def kick_foot_velocity_towards_ball(
     sensor = env.scene.sensors[sensor_name]
     assert sensor is not None
 
-    command_b = command[:, 3:6].clone()
-    command_b[:, 2] = 0.0
+    command_b = command[:, 3:6]
     command_speed = torch.linalg.norm(command_b, dim=-1).clamp(min=min_command_speed)
     command_dir_b = command_b / command_speed.unsqueeze(-1)
 
@@ -889,6 +944,18 @@ def make_reward_cfg(
                 "command_name": "twist",
                 "target_distance": 0.4,
                 "std": 0.25,
+            },
+        ),
+        "kick_base_velocity_to_setup": RewardTermCfg(
+            func=kick_base_velocity_to_setup,
+            weight=0.5,
+            params={
+                "command_name": "twist",
+                "sensor_name": "robot_ball_collision",
+                "target_distance": 0.4,
+                "target_speed": 0.45,
+                "overspeed_std": 0.3,
+                "distance_margin": 0.08,
             },
         ),
         "kick_foot_progress": RewardTermCfg(

@@ -254,6 +254,9 @@ class KickCommand(CommandTerm):
         self.vel_command_w[standing_env_ids, :] = 0.0
         self.kick_direction_command_b[standing_env_ids, :] = 0.0
         self.kick_direction_command_w[standing_env_ids, :] = 0.0
+        kicking_env_ids = self.is_kicking_env.nonzero(as_tuple=False).flatten()
+        self.vel_command_b[kicking_env_ids, :] = 0.0
+        self.vel_command_w[kicking_env_ids, :] = 0.0
         self._update_approach_commands()
 
     def create_gui(
@@ -341,6 +344,10 @@ class KickCommand(CommandTerm):
                     self.vel_command_b[idx, i] = s.value
             if self._joystick_gait_freq_slider is not None:
                 self.gait_frequency[idx] = self._joystick_gait_freq_slider.value
+
+        kicking_env_ids = self.is_kicking_env.nonzero(as_tuple=False).flatten()
+        self.vel_command_b[kicking_env_ids, :] = 0.0
+        self.vel_command_w[kicking_env_ids, :] = 0.0
 
         # Dynamically suppress gait frequency if velocity command is below threshold (0.05)
         vel_norms = torch.norm(self.vel_command_b, dim=-1)
