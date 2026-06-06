@@ -1,14 +1,10 @@
-import inspect
 import math
-from typing import Any, Callable
-from click import command
 import torch
 from mjlab.entity import Entity
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
-from mjlab.sensor import BuiltinSensor, ContactSensor
-from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor
+from mjlab.sensor import ContactSensor
 
 from mjlab.tasks.velocity import mdp
 from mjlab.utils.lab_api.math import quat_apply, quat_inv
@@ -32,57 +28,6 @@ def quat_from_yaw(yaw: torch.Tensor) -> torch.Tensor:
     x = torch.zeros_like(yaw)
     y = torch.zeros_like(yaw)
     return torch.stack([w, x, y, z], dim=-1)
-
-
-class BoundedPenaltyWrapper:
-    """Wraps both stateless functions and stateful classes to bound their penalties."""
-
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-        self.std = cfg.params.get("std", cfg.params.get("sigma", 1.0))
-        inner_func = cfg.params["func"]
-        if inspect.isclass(inner_func):
-            self.inner_callable = inner_func(cfg, env)
-        else:
-            self.inner_callable = inner_func
-
-    def __call__(self, env: ManagerBasedRlEnv, **kwargs) -> torch.Tensor:
-        inner_kwargs = {k: v for k, v in kwargs.items() if k not in ["func", "sigma", "std"]}
-
-        raw_penalty = self.inner_callable(env, **inner_kwargs)
-        return torch.exp(-torch.abs(raw_penalty) / self.std)
-
-
-def bad_base_height(
-    env: ManagerBasedRlEnv,
-    limit_height: float = 0.3,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-):
-    """Penalizes when the base height falls below the limit height."""
-    asset: Entity = env.scene[asset_cfg.name]
-    return asset.data.root_link_pos_w[:, 2] < limit_height
-
-
-def target_base_height(
-    env: ManagerBasedRlEnv,
-    target_height: float = 0.5,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    std: float = 0.1,
-):
-    """Rewards when the base height is close to the target height."""
-    asset: Entity = env.scene[asset_cfg.name]
-    height_error = torch.abs(asset.data.root_link_pos_w[:, 2] - target_height)
-    return torch.exp(-height_error / std**2)
-
-
-def base_height_below_l2(
-    env: ManagerBasedRlEnv,
-    threshold: float = 0.48,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Continuous penalty for base height below a minimum threshold."""
-    asset: Entity = env.scene[asset_cfg.name]
-    height_error = torch.clamp(threshold - asset.data.root_link_pos_w[:, 2], min=0.0)
-    return torch.square(height_error)
 
 
 class TargetBaseHeightMean:
@@ -121,34 +66,6 @@ class TargetBaseHeightMean:
             self._base_height_ema[env_ids] = 0.0
 
 
-class ActionJerkL2:
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-        self._env = env
-        device = getattr(env, "device", "cpu")
-        self._prev_prev_prev_action = torch.zeros((env.num_envs, env.action_manager.total_action_dim), device=device)
-        self._prev_prev_action = torch.zeros_like(self._prev_prev_prev_action)
-        self._prev_action = torch.zeros_like(self._prev_prev_prev_action)
-
-    def reset(self, env_ids: torch.Tensor | None = None) -> None:
-        if env_ids is None:
-            self._prev_prev_prev_action.fill_(0.0)
-            self._prev_prev_action.fill_(0.0)
-            self._prev_action.fill_(0.0)
-        else:
-            self._prev_prev_prev_action[env_ids] = 0.0
-            self._prev_prev_action[env_ids] = 0.0
-            self._prev_action[env_ids] = 0.0
-
-    def __call__(self, env: ManagerBasedRlEnv) -> torch.Tensor:
-        current_action = env.action_manager.action
-        jerk = current_action - 3.0 * self._prev_action + 3.0 * self._prev_prev_action - self._prev_prev_prev_action
-        self._prev_prev_prev_action[:] = self._prev_prev_action
-        self._prev_prev_action[:] = self._prev_action
-        self._prev_action[:] = current_action
-
-        return torch.sum(torch.square(jerk), dim=1)
-
-
 def is_walking_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
     command = env.command_manager.get_term(command_name)
     assert command is not None
@@ -185,156 +102,317 @@ def is_standing_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torc
     return standing_env_flag
 
 
-def is_approach_env(env: ManagerBasedRlEnv, command_name: str = "twist") -> torch.Tensor:
-    command = env.command_manager.get_term(command_name)
-    assert command is not None
-    approach_env_flag = getattr(command, "is_approach_env", None)
-    if approach_env_flag is not None:
-        return approach_env_flag
-    command_tensor = env.command_manager.get_command(command_name)
-    assert command_tensor is not None
-    ball_free = command_tensor[:, 6] > 0.5
-    kick = command_tensor[:, 7] > 0.5
-    dribble = command_tensor[:, 8] > 0.5
-    return ball_free & ~kick & ~dribble
-
-
-def distance_to_ball_reward(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-    target_distance: float = 0.4,
-    std: float = 0.25,
-) -> torch.Tensor:
-    """Rewards maintaining a useful base distance to the ball for approach/kick setup."""
-    robot: Entity = env.scene[robot_cfg.name]
-    assert robot is not None
-    ball: Entity = env.scene[ball_cfg.name]
-    assert ball is not None
-
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-
-    can_touch = command[:, 6] > 0.5
-
-    ball_pos = ball.data.root_link_pos_w[:, :2]
-    robot_pos = robot.data.root_link_pos_w[:, :2]
-
-    dist = torch.norm(ball_pos - robot_pos, dim=-1)
-    error = torch.abs(dist - target_distance)
-    proximity = torch.exp(-error / std**2)
-    reward = torch.zeros_like(proximity)
-
-    active = is_approach_env(env, command_name) & can_touch
-    return torch.where(active, proximity, reward)
-
-
-class KickContactReward:
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-        self.has_contacted = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-
-    def reset(self, env_ids: torch.Tensor | None = None) -> None:
-        if env_ids is None:
-            self.has_contacted.fill_(False)
-        else:
-            self.has_contacted[env_ids] = False
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        command_name: str = "twist",
-        sensor_name: str = "robot_ball_collision",
-    ) -> torch.Tensor:
-        sensor = env.scene.sensors[sensor_name]
-        assert sensor is not None
-        command = env.command_manager.get_command(command_name)
-        assert command is not None
-
-        active = is_kicking_env(env, command_name) & (command[:, 6] > 0.5)
-        contact = (sensor.data.found[:, 0] > 0.5) & active
-        first_contact = contact & ~self.has_contacted
-        self.has_contacted.logical_or_(contact)
-        return first_contact.float()
-
-
-class KickVelocityReward:
-    def __init__(
-        self,
-        cfg: RewardTermCfg,
-        env: ManagerBasedRlEnv,
-    ):
-        self.env = env
-        self.cfg = cfg
-        self.remaining_steps = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+class KickDetector:
+    def __init__(self, env: ManagerBasedRlEnv):
+        self.last_step: int | None = None
+        self.last_ball_vel_w = torch.zeros(env.num_envs, 3, dtype=torch.float, device=env.device)
+        self.steps_since_ball_reset = torch.zeros(env.num_envs, dtype=torch.long, device=env.device)
+        self.remaining_reward_steps = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
         self.latched_command_b = torch.zeros(env.num_envs, 3, dtype=torch.float, device=env.device)
-        self.has_contacted = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self.has_detected = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self.just_detected = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+        self.ball_speed = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+        self.ball_direction_error = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
+        self.projected_ball_speed = torch.zeros(env.num_envs, dtype=torch.float, device=env.device)
 
     def reset(self, env_ids: torch.Tensor | None = None) -> None:
         if env_ids is None:
-            self.remaining_steps.fill_(0.0)
-            self.latched_command_b.fill_(0.0)
-            self.has_contacted.fill_(False)
-        else:
-            self.remaining_steps[env_ids] = 0.0
-            self.latched_command_b[env_ids] = 0.0
-            self.has_contacted[env_ids] = False
+            env_ids = slice(None)
+        self.last_step = None
+        self.steps_since_ball_reset[env_ids] = 0
+        self.remaining_reward_steps[env_ids] = 0.0
+        self.latched_command_b[env_ids] = 0.0
+        self.has_detected[env_ids] = False
+        self.just_detected[env_ids] = False
+        self.ball_speed[env_ids] = 0.0
+        self.ball_direction_error[env_ids] = 0.0
+        self.projected_ball_speed[env_ids] = 0.0
 
-    def __call__(
+    def notify_ball_reset(self, env_ids: torch.Tensor | None = None) -> None:
+        self.reset(env_ids)
+
+    def update(
         self,
         env: ManagerBasedRlEnv,
-        command_name: str = "twist",
-        robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-        ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-        sensor_name: str = "robot_ball_collision",
-        std: float = 0.75,
-        reward_window_steps: int = 20,
-        min_command_speed: float = 0.1,
-    ) -> torch.Tensor:
-        "Rewards ball speed along the kick command for several frames after kick contact."
+        command_name: str,
+        robot_cfg: SceneEntityCfg,
+        ball_cfg: SceneEntityCfg,
+        sensor_name: str,
+        foot_ball_distance_threshold: float,
+        min_ball_speed_delta: float,
+        min_ball_speed: float,
+        min_foot_speed_towards_ball: float,
+        min_steps_since_ball_reset: int,
+        reward_window_steps: int,
+    ) -> "KickDetector":
+        step = getattr(env, "common_step_counter", None)
+        if isinstance(step, torch.Tensor):
+            step = int(step.item())
+        if isinstance(step, int) and self.last_step == step:
+            return self
+
+        robot: Entity = env.scene[robot_cfg.name]
+        ball: Entity = env.scene[ball_cfg.name]
         sensor = env.scene.sensors[sensor_name]
         assert sensor is not None
         command = env.command_manager.get_command(command_name)
         assert command is not None
-        robot: Entity = env.scene[robot_cfg.name]
-        assert robot is not None
-        ball: Entity = env.scene[ball_cfg.name]
-        assert ball is not None
 
-        can_touch = command[:, 6] > 0.5
-        active = is_kicking_env(env, command_name) & can_touch
+        ball_vel_w = ball.data.root_link_vel_w[:, :3]
+        ball_speed_delta = torch.linalg.norm(ball_vel_w - self.last_ball_vel_w, dim=-1)
+        current_ball_speed = torch.linalg.norm(ball_vel_w, dim=-1)
+
+        foot_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids, :]
+        foot_vel_w = robot.data.site_lin_vel_w[:, robot_cfg.site_ids, :]
+        ball_pos_w = ball.data.root_link_pos_w[:, None, :]
+        foot_to_ball = ball_pos_w - foot_pos_w
+        foot_ball_dist = torch.linalg.norm(foot_to_ball, dim=-1)
+        min_foot_ball_dist = torch.min(foot_ball_dist, dim=1).values
+        foot_to_ball_dir = foot_to_ball / foot_ball_dist.clamp(min=1e-6).unsqueeze(-1)
+        foot_speed_towards_ball = torch.sum(foot_vel_w * foot_to_ball_dir, dim=-1).max(dim=1).values
+
         command_b = command[:, 3:6]
         command_speed = torch.linalg.norm(command_b, dim=-1)
-        contact = (sensor.data.found[:, 0] > 0.5) & active & (command_speed > min_command_speed)
-        first_contact = contact & ~self.has_contacted
-        self.has_contacted.logical_or_(contact)
+        active = is_kicking_env(env, command_name) & (command[:, 6] > 0.5) & (command_speed > 0.1)
+        contact = sensor.data.found[:, 0] > 0.5
+        valid_foot = min_foot_ball_dist <= foot_ball_distance_threshold
+        valid_ball_change = (ball_speed_delta >= min_ball_speed_delta) | (current_ball_speed >= min_ball_speed)
+        valid_foot_motion = foot_speed_towards_ball >= min_foot_speed_towards_ball
+        old_enough = self.steps_since_ball_reset >= min_steps_since_ball_reset
+        detected = active & contact & valid_foot & valid_ball_change & valid_foot_motion & old_enough & ~self.has_detected
 
-        self.latched_command_b = torch.where(first_contact.unsqueeze(-1), command_b, self.latched_command_b)
-        self.remaining_steps = torch.where(
-            first_contact,
-            torch.full_like(self.remaining_steps, float(reward_window_steps)),
-            (self.remaining_steps - 1.0).clamp(min=0.0),
+        self.just_detected = detected
+        self.has_detected.logical_or_(detected)
+        self.latched_command_b = torch.where(detected.unsqueeze(-1), command_b, self.latched_command_b)
+        self.remaining_reward_steps = torch.where(
+            detected,
+            torch.full_like(self.remaining_reward_steps, float(reward_window_steps)),
+            (self.remaining_reward_steps - 1.0).clamp(min=0.0),
         )
 
         yaw = get_yaw_from_quaternion(robot.data.root_link_quat_w)
         yaw_only_quat_w = quat_from_yaw(yaw)
-        ball_vel_heading = quat_apply(quat_inv(yaw_only_quat_w), ball.data.root_link_vel_w[:, :3])
-
-        latched_speed = torch.linalg.norm(self.latched_command_b, dim=-1).clamp(min=min_command_speed)
+        ball_vel_heading = quat_apply(quat_inv(yaw_only_quat_w), ball_vel_w)
+        latched_speed = torch.linalg.norm(self.latched_command_b, dim=-1).clamp(min=0.1)
         latched_dir = self.latched_command_b / latched_speed.unsqueeze(-1)
-        projected_speed = torch.sum(ball_vel_heading * latched_dir, dim=-1).clamp(min=0.0)
-        speed_error = projected_speed - latched_speed
-        speed_gate = (projected_speed / latched_speed).clamp(min=0.0, max=1.0)
-        reward = torch.exp(-torch.square(speed_error) / std**2) * speed_gate
+        ball_speed = torch.linalg.norm(ball_vel_heading, dim=-1).clamp(min=1e-6)
+        ball_dir = ball_vel_heading / ball_speed.unsqueeze(-1)
+        cos_error = torch.sum(ball_dir * latched_dir, dim=-1).clamp(min=-1.0, max=1.0)
 
-        active_window = self.remaining_steps > 0.0
-        if "log" in env.extras:
-            active_count = active_window.float().sum().clamp(min=1.0)
-            env.extras["log"]["Metrics/kick_projected_ball_speed"] = (
-                projected_speed * active_window.float()
-            ).sum() / active_count
+        self.ball_speed = ball_speed
+        self.ball_direction_error = torch.acos(cos_error)
+        self.projected_ball_speed = torch.sum(ball_vel_heading * latched_dir, dim=-1).clamp(min=0.0)
+        self.last_ball_vel_w = ball_vel_w.clone()
+        self.steps_since_ball_reset += 1
+        if isinstance(step, int):
+            self.last_step = step
+        return self
 
-        return reward * active_window.float()
+
+def _kick_detector(env: ManagerBasedRlEnv) -> KickDetector:
+    detector = getattr(env, "kick_detector", None)
+    if detector is None:
+        detector = KickDetector(env)
+        setattr(env, "kick_detector", detector)
+    return detector
+
+
+def _updated_kick_detector(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    sensor_name: str = "robot_ball_collision",
+    foot_ball_distance_threshold: float = 0.28,
+    min_ball_speed_delta: float = 0.15,
+    min_ball_speed: float = 0.25,
+    min_foot_speed_towards_ball: float = 0.1,
+    min_steps_since_ball_reset: int = 10,
+    reward_window_steps: int = 30,
+) -> KickDetector:
+    return _kick_detector(env).update(
+        env=env,
+        command_name=command_name,
+        robot_cfg=robot_cfg,
+        ball_cfg=ball_cfg,
+        sensor_name=sensor_name,
+        foot_ball_distance_threshold=foot_ball_distance_threshold,
+        min_ball_speed_delta=min_ball_speed_delta,
+        min_ball_speed=min_ball_speed,
+        min_foot_speed_towards_ball=min_foot_speed_towards_ball,
+        min_steps_since_ball_reset=min_steps_since_ball_reset,
+        reward_window_steps=reward_window_steps,
+    )
+
+
+def _kick_reference_pose(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    robot_cfg: SceneEntityCfg,
+    ball_cfg: SceneEntityCfg,
+    distance: float,
+    lateral_offset: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    robot: Entity = env.scene[robot_cfg.name]
+    ball: Entity = env.scene[ball_cfg.name]
+    command = env.command_manager.get_command(command_name)
+    assert command is not None
+
+    command_xy_b = command[:, 3:5]
+    command_xy_b = command_xy_b / torch.linalg.norm(command_xy_b, dim=-1, keepdim=True).clamp(min=1e-6)
+    yaw = get_yaw_from_quaternion(robot.data.root_link_quat_w)
+    yaw_only_quat_w = quat_from_yaw(yaw)
+    command_dir_w = quat_apply(
+        yaw_only_quat_w,
+        torch.cat((command_xy_b, torch.zeros(command_xy_b.shape[0], 1, device=command_xy_b.device)), dim=-1),
+    )[:, :2]
+    command_dir_w = command_dir_w / torch.linalg.norm(command_dir_w, dim=-1, keepdim=True).clamp(min=1e-6)
+    perp_w = torch.stack((-command_dir_w[:, 1], command_dir_w[:, 0]), dim=-1)
+
+    robot_pos = robot.data.root_link_pos_w[:, :2]
+    ball_pos = ball.data.root_link_pos_w[:, :2]
+    robot_from_ball = robot_pos - ball_pos
+    side = torch.sign(torch.sum(robot_from_ball * perp_w, dim=-1, keepdim=True))
+    side = torch.where(side == 0.0, torch.ones_like(side), side)
+    reference_pos = ball_pos - command_dir_w * distance + perp_w * side * lateral_offset
+    return reference_pos, command_dir_w, perp_w
+
+
+def _kick_setup_state(
+    env: ManagerBasedRlEnv,
+    command_name: str,
+    robot_cfg: SceneEntityCfg,
+    ball_cfg: SceneEntityCfg,
+    distance: float,
+    lateral_offset: float,
+    ready_distance: float,
+    ready_yaw_error: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    robot: Entity = env.scene[robot_cfg.name]
+    ball: Entity = env.scene[ball_cfg.name]
+    setup_pos, command_dir_w, perp_w = _kick_reference_pose(
+        env, command_name, robot_cfg, ball_cfg, distance, lateral_offset
+    )
+    robot_pos = robot.data.root_link_pos_w[:, :2]
+    ball_pos = ball.data.root_link_pos_w[:, :2]
+    setup_error = torch.linalg.norm(setup_pos - robot_pos, dim=-1)
+
+    ball_rel = ball_pos - robot_pos
+    target_yaw = torch.atan2(ball_rel[:, 1], ball_rel[:, 0])
+    heading = robot.data.heading_w
+    yaw_error = torch.atan2(torch.sin(target_yaw - heading), torch.cos(target_yaw - heading))
+    ready = (setup_error < ready_distance) & (torch.abs(yaw_error) < ready_yaw_error)
+    return setup_pos, command_dir_w, perp_w, setup_error, yaw_error, ready
+
+
+class KickDirectionReward:
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        del cfg
+        _kick_detector(env)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        # The detector is reset by ball-reset events and environment resets through other terms.
+        del env_ids
+
+    def __call__(self, env: ManagerBasedRlEnv, std: float = 0.35, **detector_kwargs) -> torch.Tensor:
+        detector = _updated_kick_detector(env, **detector_kwargs)
+        reward = (torch.exp(-torch.square(detector.ball_direction_error) / std**2) - 0.5) * 2.0
+        return reward * (detector.remaining_reward_steps > 0.0).float()
+
+
+class KickVelocityReward:
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
+        del cfg
+        _kick_detector(env)
+
+    def reset(self, env_ids: torch.Tensor | None = None) -> None:
+        del env_ids
+
+    def __call__(self, env: ManagerBasedRlEnv, std: float = 0.75, direction_std: float = 0.35, **detector_kwargs) -> torch.Tensor:
+        detector = _updated_kick_detector(env, **detector_kwargs)
+        target_speed = torch.linalg.norm(detector.latched_command_b, dim=-1).clamp(min=0.1)
+        speed_reward = torch.exp(-torch.square(detector.projected_ball_speed - target_speed) / std**2)
+        direction_gate = torch.exp(-torch.square(detector.ball_direction_error) / direction_std**2)
+        return speed_reward * direction_gate * (detector.remaining_reward_steps > 0.0).float()
+
+
+def kick_setup_and_strike_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    distance: float = 0.4,
+    lateral_offset: float = 0.15,
+    target_speed: float = 0.6,
+    ready_distance: float = 0.18,
+    ready_yaw_error: float = 0.7,
+    kick_through_distance: float = 0.05,
+    setup_std: float = 0.25,
+    yaw_std: float = 0.7,
+) -> torch.Tensor:
+    robot: Entity = env.scene[robot_cfg.name]
+    ball: Entity = env.scene[ball_cfg.name]
+    setup_pos, command_dir_w, _, setup_error, yaw_error, ready = _kick_setup_state(
+        env, command_name, robot_cfg, ball_cfg, distance, lateral_offset, ready_distance, ready_yaw_error
+    )
+
+    ball_pos = ball.data.root_link_pos_w[:, :2]
+    kick_target = ball_pos + command_dir_w * kick_through_distance
+    target_pos = torch.where(ready.unsqueeze(-1), kick_target, setup_pos)
+    to_target = target_pos - robot.data.root_link_pos_w[:, :2]
+    target_error = torch.linalg.norm(to_target, dim=-1)
+    target_dir = to_target / target_error.clamp(min=1e-6).unsqueeze(-1)
+    projected_speed = torch.sum(robot.data.root_link_vel_w[:, :2] * target_dir, dim=-1).clamp(min=0.0)
+    move_reward = (projected_speed / target_speed).clamp(max=1.0)
+
+    yaw_reward = torch.exp(-torch.square(yaw_error) / yaw_std**2)
+    setup_reward = torch.exp(-torch.square(setup_error) / setup_std**2) * yaw_reward
+    approach_reward = 0.5 * move_reward * yaw_reward + 0.5 * setup_reward
+    through_ball_reward = move_reward * yaw_reward
+
+    active = is_kicking_env(env, command_name)
+    return torch.where(ready, through_ball_reward, approach_reward) * active.float()
+
+
+def kick_ball_avoidance_reward(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    reference_robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    distance: float = 0.4,
+    lateral_offset: float = 0.15,
+    std: float = 0.25,
+    ready_distance: float = 0.18,
+    ready_yaw_error: float = 0.7,
+) -> torch.Tensor:
+    robot: Entity = env.scene[robot_cfg.name]
+    ball: Entity = env.scene[ball_cfg.name]
+    _, _, _, _, _, ready = _kick_setup_state(
+        env, command_name, reference_robot_cfg, ball_cfg, distance, lateral_offset, ready_distance, ready_yaw_error
+    )
+    foot_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids, :]
+    ball_pos_w = ball.data.root_link_pos_w[:, None, :]
+    min_distance = torch.linalg.norm(foot_pos_w - ball_pos_w, dim=-1).min(dim=1).values
+    active = is_kicking_env(env, command_name) & ~ready
+    return torch.exp(-torch.square(min_distance) / std**2) * active.float()
+
+
+def kick_pose_overshoot_penalty(
+    env: ManagerBasedRlEnv,
+    command_name: str = "twist",
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
+    distance: float = 0.4,
+    lateral_offset: float = 0.15,
+) -> torch.Tensor:
+    robot: Entity = env.scene[robot_cfg.name]
+    ball: Entity = env.scene[ball_cfg.name]
+    _, command_dir_w, _ = _kick_reference_pose(env, command_name, robot_cfg, ball_cfg, distance, lateral_offset)
+    robot_to_ball = ball.data.root_link_pos_w[:, :2] - robot.data.root_link_pos_w[:, :2]
+    behind_ball = torch.sum(robot_to_ball * command_dir_w, dim=-1)
+    active = is_kicking_env(env, command_name)
+    return (behind_ball < 0.0).float() * active.float()
 
 
 class TrackLinearVelocityMean:
@@ -435,299 +513,6 @@ class TrackAngularVelocityMean:
         )
 
 
-def ball_dribble_position(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-    target_distance: float = 0.4,
-    std: float = 0.3,
-    in_range_dist: float = 1.0,
-) -> torch.Tensor:
-    """Rewards keeping the ball at a specific distance directly in front of the robot for dribbling, if free and in range."""
-    robot: Entity = env.scene[robot_cfg.name]
-    ball: Entity = env.scene[ball_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-
-    can_touch = command[:, 6] > 0.5
-
-    ball_pos = ball.data.root_link_pos_w[:, :2]
-    robot_pos = robot.data.root_link_pos_w[:, :2]
-
-    dist_to_ball = torch.norm(ball_pos - robot_pos, dim=-1)
-    in_range = dist_to_ball <= in_range_dist
-
-    heading = robot.data.heading_w
-    forward_vec = torch.stack([torch.cos(heading), torch.sin(heading)], dim=-1)
-
-    target_pos = robot_pos + forward_vec * target_distance
-    error = torch.norm(ball_pos - target_pos, dim=-1)
-
-    reward = torch.exp(-error / std**2)
-
-    active = is_dribble_env(env, command_name) & can_touch & in_range
-    return torch.where(active, reward, torch.zeros_like(reward))
-
-
-def ball_approach_alignment(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-) -> torch.Tensor:
-    """Rewards moving towards the ball and facing it; penalizes turning away, applied when ball is not in range."""
-    robot: Entity = env.scene[robot_cfg.name]
-    ball: Entity = env.scene[ball_cfg.name]
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-
-    robot_pos_w = robot.data.root_link_pos_w
-    ball_pos_w = ball.data.root_link_pos_w
-
-    relative_pos_w = ball_pos_w - robot_pos_w
-
-    robot_quat_w = robot.data.root_link_quat_w
-    relative_pos_b = quat_apply(quat_inv(robot_quat_w), relative_pos_w)
-
-    angle_to_ball = torch.atan2(relative_pos_b[:, 1], relative_pos_b[:, 0])
-
-    active = is_approach_env(env, command_name)
-
-    alignment_score = 1.0 - (abs(angle_to_ball) / torch.pi)
-
-    return alignment_score * active
-
-
-def kick_base_velocity_to_setup(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-    sensor_name: str = "robot_ball_collision",
-    target_distance: float = 0.4,
-    target_speed: float = 0.45,
-    overspeed_std: float = 0.3,
-    distance_margin: float = 0.08,
-) -> torch.Tensor:
-    """Reward controlled base motion to a command-dependent kick setup pose, not into the ball."""
-    robot: Entity = env.scene[robot_cfg.name]
-    ball: Entity = env.scene[ball_cfg.name]
-    sensor = env.scene.sensors[sensor_name]
-    assert sensor is not None
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-
-    command_b = command[:, 3:6].clone()
-    command_b[:, 2] = 0.0
-    command_dir_b = command_b / torch.linalg.norm(command_b, dim=-1).clamp(min=1e-6).unsqueeze(-1)
-
-    yaw = get_yaw_from_quaternion(robot.data.root_link_quat_w)
-    yaw_only_quat_w = quat_from_yaw(yaw)
-    command_dir_w = quat_apply(yaw_only_quat_w, command_dir_b)[:, :2]
-
-    robot_pos = robot.data.root_link_pos_w[:, :2]
-    ball_pos = ball.data.root_link_pos_w[:, :2]
-    setup_pos = ball_pos - command_dir_w * target_distance
-    to_setup = setup_pos - robot_pos
-    setup_error = torch.linalg.norm(to_setup, dim=-1)
-    setup_dir = to_setup / setup_error.clamp(min=1e-6).unsqueeze(-1)
-
-    robot_vel = robot.data.root_link_vel_w[:, :2]
-    projected_speed = torch.sum(robot_vel * setup_dir, dim=-1).clamp(min=0.0)
-    speed_up_reward = (projected_speed / target_speed).clamp(max=1.0)
-    overspeed_penalty = torch.exp(-torch.square((projected_speed - target_speed).clamp(min=0.0)) / overspeed_std**2)
-    reward = speed_up_reward * overspeed_penalty
-
-    active = (
-        is_kicking_env(env, command_name)
-        & (command[:, 6] > 0.5)
-        & (sensor.data.found[:, 0] <= 0.5)
-        & (setup_error > distance_margin)
-    )
-    active_f = active.float()
-
-    if "log" in env.extras:
-        active_count = active_f.sum().clamp(min=1.0)
-        env.extras["log"]["Metrics/kick_base_projected_speed"] = (projected_speed * active_f).sum() / active_count
-        env.extras["log"]["Metrics/kick_base_setup_error"] = (setup_error * active_f).sum() / active_count
-
-    return reward * active_f
-
-
-class KickFootProgressReward:
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-        self.best_distance = torch.full((env.num_envs,), float("inf"), dtype=torch.float, device=env.device)
-
-    def reset(self, env_ids: torch.Tensor | None = None) -> None:
-        if env_ids is None:
-            self.best_distance.fill_(float("inf"))
-        else:
-            self.best_distance[env_ids] = float("inf")
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        command_name: str = "twist",
-        robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
-        ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-        sensor_name: str = "robot_ball_collision",
-        progress_scale: float = 0.05,
-        proximity_std: float = 0.35,
-    ) -> torch.Tensor:
-        """Reward new best foot-ball distance only; standing near the ball pays zero."""
-        robot: Entity = env.scene[robot_cfg.name]
-        ball: Entity = env.scene[ball_cfg.name]
-        sensor = env.scene.sensors[sensor_name]
-        assert sensor is not None
-
-        foot_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids, :]
-        ball_pos_w = ball.data.root_link_pos_w[:, None, :]
-        distances = torch.linalg.norm(foot_pos_w - ball_pos_w, dim=-1)
-        min_distance = torch.min(distances, dim=1).values
-
-        active = is_kicking_env(env, command_name) & (sensor.data.found[:, 0] <= 0.5)
-        previous_best = self.best_distance.clone()
-        initialized = torch.isfinite(previous_best)
-        progress = torch.where(initialized, previous_best - min_distance, torch.zeros_like(min_distance)).clamp(min=0.0)
-        proximity = torch.exp(-torch.square(min_distance) / proximity_std**2)
-        reward = (progress / progress_scale).clamp(max=1.0) * proximity
-
-        self.best_distance = torch.where(
-            active,
-            torch.minimum(self.best_distance, min_distance),
-            min_distance,
-        )
-
-        active_f = active.float()
-        if "log" in env.extras:
-            active_count = active_f.sum().clamp(min=1.0)
-            env.extras["log"]["Metrics/kick_min_foot_ball_distance"] = (min_distance * active_f).sum() / active_count
-
-        return reward * active_f
-
-
-def kick_foot_velocity_towards_ball(
-    env: ManagerBasedRlEnv,
-    command_name: str = "twist",
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
-    ball_cfg: SceneEntityCfg = SceneEntityCfg("ball"),
-    sensor_name: str = "robot_ball_collision",
-    proximity_std: float = 0.45,
-    min_command_speed: float = 0.1,
-) -> torch.Tensor:
-    """Dense kick shaping: swing a nearby foot along the commanded kick direction."""
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-    robot: Entity = env.scene[robot_cfg.name]
-    ball: Entity = env.scene[ball_cfg.name]
-    sensor = env.scene.sensors[sensor_name]
-    assert sensor is not None
-
-    command_b = command[:, 3:6]
-    command_speed = torch.linalg.norm(command_b, dim=-1).clamp(min=min_command_speed)
-    command_dir_b = command_b / command_speed.unsqueeze(-1)
-
-    foot_vel_w = robot.data.site_lin_vel_w[:, robot_cfg.site_ids, :]
-    root_quat_inv = quat_inv(robot.data.root_link_quat_w).unsqueeze(1).expand(-1, foot_vel_w.shape[1], -1)
-    foot_vel_b = quat_apply(root_quat_inv.reshape(-1, 4), foot_vel_w.reshape(-1, 3)).reshape_as(foot_vel_w)
-    projected_speed = torch.sum(foot_vel_b * command_dir_b[:, None, :], dim=-1).clamp(min=0.0)
-
-    foot_pos_w = robot.data.site_pos_w[:, robot_cfg.site_ids, :]
-    ball_pos_w = ball.data.root_link_pos_w[:, None, :]
-    distances = torch.linalg.norm(foot_pos_w - ball_pos_w, dim=-1)
-    proximity = torch.exp(-torch.square(distances) / proximity_std**2)
-    per_foot_reward = (projected_speed / command_speed[:, None]).clamp(max=1.0) * proximity
-    reward = torch.max(per_foot_reward, dim=1).values
-    active = is_kicking_env(env, command_name) & (sensor.data.found[:, 0] <= 0.5)
-    active_f = active.float()
-
-    if "log" in env.extras:
-        active_count = active_f.sum().clamp(min=1.0)
-        env.extras["log"]["Metrics/kick_foot_projected_speed"] = (
-            torch.max(projected_speed, dim=1).values * active_f
-        ).sum() / active_count
-
-    return reward * active_f
-
-
-def feet_air_time(
-    env: ManagerBasedRlEnv,
-    sensor_name: str,
-    threshold_min: float = 0.05,
-    threshold_max: float = 0.5,
-    command_name: str = "twist",
-    command_threshold: float = 0.5,
-) -> torch.Tensor:
-    """Reward feet air time."""
-    sensor: ContactSensor = env.scene[sensor_name]
-    sensor_data = sensor.data
-    command = env.command_manager.get_command(command_name)
-    assert command is not None
-    current_air_time = sensor_data.current_air_time
-    assert current_air_time is not None
-    in_range = (current_air_time > threshold_min) & (current_air_time < threshold_max)
-    reward = torch.sum(in_range.float(), dim=1)
-    in_air = current_air_time > 0
-    num_in_air = torch.sum(in_air.float())
-    mean_air_time = torch.sum(current_air_time * in_air.float()) / torch.clamp(num_in_air, min=1)
-    env.extras["log"]["Metrics/air_time_mean"] = mean_air_time
-
-    command_active = (command[:, :2] ** 2).sum(dim=-1).sqrt() > command_threshold
-
-    active = is_standing_env(env, command_name) < 0.5 * command_active.float()
-
-    return reward * active
-
-
-class feet_swing_height:
-    """Penalize deviation from target swing height, evaluated at landing."""
-
-    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRlEnv):
-        height_sensor = env.scene[cfg.params["height_sensor_name"]]
-        assert isinstance(height_sensor, TerrainHeightSensor), (
-            f"feet_swing_height requires a TerrainHeightSensor, got {type(height_sensor).__name__}"
-        )
-        num_feet = height_sensor.num_frames
-        self.peak_heights = torch.zeros((env.num_envs, num_feet), device=env.device, dtype=torch.float32)
-        self.step_dt = env.step_dt
-
-    def __call__(
-        self,
-        env: ManagerBasedRlEnv,
-        sensor_name: str,
-        height_sensor_name: str,
-        target_height: float,
-        command_name: str,
-        command_threshold: float,
-    ) -> torch.Tensor:
-        contact_sensor: ContactSensor = env.scene[sensor_name]
-        command = env.command_manager.get_command(command_name)
-        assert command is not None
-        height_sensor: TerrainHeightSensor = env.scene[height_sensor_name]
-        foot_heights = height_sensor.data.heights
-        in_air = contact_sensor.data.found == 0
-        self.peak_heights = torch.where(
-            in_air,
-            torch.maximum(self.peak_heights, foot_heights),
-            self.peak_heights,
-        )
-        first_contact = contact_sensor.compute_first_contact(dt=self.step_dt)
-        active = is_standing_env(env, command_name) < 0.5
-        error = self.peak_heights / target_height - 1.0
-        cost = torch.sum(torch.square(error) * first_contact.float(), dim=1) * active
-        num_landings = torch.sum(first_contact.float())
-        peak_heights_at_landing = self.peak_heights * first_contact.float()
-        mean_peak_height = torch.sum(peak_heights_at_landing) / torch.clamp(num_landings, min=1)
-        env.extras["log"]["Metrics/peak_height_mean"] = mean_peak_height
-        self.peak_heights = torch.where(
-            first_contact,
-            torch.zeros_like(self.peak_heights),
-            self.peak_heights,
-        )
-        return cost
-
-
 def contact_any(env: ManagerBasedRlEnv, sensor_name: str) -> torch.Tensor:
     """Penalty signal for any contact reported by a contact sensor."""
     sensor: ContactSensor = env.scene[sensor_name]
@@ -743,32 +528,6 @@ def joint_default_pose_l2(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg) -> 
     joint_ids = asset_cfg.joint_ids
     error = asset.data.joint_pos[:, joint_ids] - asset.data.default_joint_pos[:, joint_ids]
     return torch.mean(torch.square(error), dim=1)
-
-
-def soft_landing(
-    env: ManagerBasedRlEnv,
-    sensor_name: str,
-    command_name: str | None = None,
-    command_threshold: float = 0.05,
-) -> torch.Tensor:
-    """Penalize high impact forces at landing to encourage soft footfalls."""
-    contact_sensor: ContactSensor = env.scene[sensor_name]
-    sensor_data = contact_sensor.data
-    assert sensor_data.force is not None
-    forces = sensor_data.force  # [B, N, 3]
-    force_magnitude = torch.norm(forces, dim=-1)  # [B, N]
-    first_contact = contact_sensor.compute_first_contact(dt=env.step_dt)  # [B, N]
-    landing_impact = force_magnitude * first_contact.float()  # [B, N]
-    cost = torch.sum(landing_impact, dim=1)  # [B]
-    num_landings = torch.sum(first_contact.float())
-    mean_landing_force = torch.sum(landing_impact) / torch.clamp(num_landings, min=1)
-    env.extras["log"]["Metrics/landing_force_mean"] = mean_landing_force
-    if command_name is not None:
-        command = env.command_manager.get_command(command_name)
-        if command is not None:
-            active = is_standing_env(env, command_name) < 0.5
-            cost = cost * active
-    return cost
 
 
 class amp_reward:
@@ -851,11 +610,6 @@ def make_reward_cfg(
                 "std": math.sqrt(0.3),
             },
         ),
-        # "low_base_height": RewardTermCfg(
-        #     func=base_height_below_l2,
-        #     weight=-50.0,
-        #     params={"threshold": 0.48},
-        # ),
         "dof_pos_limits": RewardTermCfg(func=mdp.joint_pos_limits, weight=-1.0),
         "self_collision": RewardTermCfg(
             func=contact_any,
@@ -932,68 +686,72 @@ def make_reward_cfg(
                 "command_threshold": 0.05,
             },
         ),
-        "ball_approach_alignment": RewardTermCfg(
-            func=ball_approach_alignment,
-            weight=0.5,
-            params={"command_name": "twist"},
-        ),
-        "kick_ready_distance": RewardTermCfg(
-            func=distance_to_ball_reward,
-            weight=0.75,
-            params={
-                "command_name": "twist",
-                "target_distance": 0.4,
-                "std": 0.25,
-            },
-        ),
-        "kick_base_velocity_to_setup": RewardTermCfg(
-            func=kick_base_velocity_to_setup,
-            weight=0.5,
-            params={
-                "command_name": "twist",
-                "sensor_name": "robot_ball_collision",
-                "target_distance": 0.4,
-                "target_speed": 0.45,
-                "overspeed_std": 0.3,
-                "distance_margin": 0.08,
-            },
-        ),
-        "kick_foot_progress": RewardTermCfg(
-            func=KickFootProgressReward,
+        "kick_setup_and_strike": RewardTermCfg(
+            func=kick_setup_and_strike_reward,
             weight=1.0,
             params={
                 "command_name": "twist",
-                "robot_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
-                "sensor_name": "robot_ball_collision",
-                "progress_scale": 0.05,
-                "proximity_std": 0.35,
+                "distance": 0.4,
+                "lateral_offset": 0.15,
+                "target_speed": 0.6,
+                "ready_distance": 0.18,
+                "ready_yaw_error": 0.7,
+                "kick_through_distance": 0.05,
+                "setup_std": 0.25,
+                "yaw_std": 0.7,
             },
         ),
-        "kick_foot_velocity": RewardTermCfg(
-            func=kick_foot_velocity_towards_ball,
-            weight=2.0,
+        "kick_ball_avoidance": RewardTermCfg(
+            func=kick_ball_avoidance_reward,
+            weight=-3.0,
             params={
                 "command_name": "twist",
-                "robot_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
-                "sensor_name": "robot_ball_collision",
-                "proximity_std": 0.45,
+                "distance": 0.4,
+                "lateral_offset": 0.15,
+                "std": 0.25,
+                "ready_distance": 0.18,
+                "ready_yaw_error": 0.7,
             },
         ),
-        "kick_contact": RewardTermCfg(
-            func=KickContactReward,
+        "kick_pose_overshoot_penalty": RewardTermCfg(
+            func=kick_pose_overshoot_penalty,
+            weight=-20.0,
+            params={
+                "command_name": "twist",
+                "distance": 0.5,
+                "lateral_offset": 0.15,
+            },
+        ),
+        "kick_direction": RewardTermCfg(
+            func=KickDirectionReward,
             weight=4.0,
             params={
                 "command_name": "twist",
                 "sensor_name": "robot_ball_collision",
+                "robot_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
+                "std": 0.35,
+                "foot_ball_distance_threshold": 0.28,
+                "min_ball_speed_delta": 0.15,
+                "min_ball_speed": 0.25,
+                "min_foot_speed_towards_ball": 0.1,
+                "min_steps_since_ball_reset": 10,
+                "reward_window_steps": 30,
             },
         ),
         "kick_velocity": RewardTermCfg(
             func=KickVelocityReward,
-            weight=8.0,
+            weight=10.0,
             params={
                 "command_name": "twist",
                 "sensor_name": "robot_ball_collision",
+                "robot_cfg": SceneEntityCfg("robot", site_names=("left_foot", "right_foot")),
                 "std": 0.75,
+                "direction_std": 0.35,
+                "foot_ball_distance_threshold": 0.28,
+                "min_ball_speed_delta": 0.15,
+                "min_ball_speed": 0.25,
+                "min_foot_speed_towards_ball": 0.1,
+                "min_steps_since_ball_reset": 10,
                 "reward_window_steps": 30,
             },
         ),

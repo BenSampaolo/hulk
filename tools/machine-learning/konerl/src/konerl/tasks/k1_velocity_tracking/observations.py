@@ -186,6 +186,112 @@ def obs_ball_vel_heading_frame(
         ball_vel_heading = torch.where(ball_vel_heading[:, 1:2] < 0, torch.zeros_like(ball_vel_heading), ball_vel_heading)
     return ball_vel_heading
 
+
+class BallObservationCache:
+    def __init__(self, max_delay_steps: int = 6, max_position_noise: float = 0.03):
+        self.max_delay_steps = max_delay_steps
+        self.max_position_noise = max_position_noise
+        self._state_by_env: dict[int, dict[str, Any]] = {}
+
+    def _raw_pos_vel(self, env: ManagerBasedRlEnv) -> tuple[torch.Tensor, torch.Tensor]:
+        return obs_ball_pos_heading_frame(env, outside_info=True), obs_ball_vel_heading_frame(env, outside_info=True)
+
+    def _ensure_state(self, env: ManagerBasedRlEnv) -> dict[str, Any]:
+        env_key = id(env)
+        pos, vel = self._raw_pos_vel(env)
+        num_envs = pos.shape[0]
+        history_len = self.max_delay_steps + 2
+        state = self._state_by_env.get(env_key)
+        if state is None or state["pos_history"].shape[:2] != (num_envs, history_len):
+            state = {
+                "pos_history": pos[:, None, :].repeat(1, history_len, 1),
+                "vel_history": vel[:, None, :].repeat(1, history_len, 1),
+                "lag": torch.zeros(num_envs, dtype=torch.long, device=pos.device),
+                "last_step": None,
+            }
+            self._state_by_env[env_key] = state
+            setattr(env, "ball_observation_cache", self)
+        return state
+
+    def reset(self, env: ManagerBasedRlEnv, env_ids: torch.Tensor | None = None) -> None:
+        state = self._ensure_state(env)
+        pos, vel = self._raw_pos_vel(env)
+        if env_ids is None:
+            env_ids = torch.arange(pos.shape[0], device=pos.device, dtype=torch.long)
+        history_len = self.max_delay_steps + 2
+        state["pos_history"][env_ids] = pos[env_ids, None, :].repeat(1, history_len, 1)
+        state["vel_history"][env_ids] = vel[env_ids, None, :].repeat(1, history_len, 1)
+        state["lag"][env_ids] = 0
+
+    def _update(self, env: ManagerBasedRlEnv) -> dict[str, Any]:
+        state = self._ensure_state(env)
+        step_index = _get_env_step_index(env)
+        if step_index is not None and state["last_step"] == step_index:
+            return state
+
+        pos, vel = self._raw_pos_vel(env)
+        state["pos_history"][:, 1:] = state["pos_history"][:, :-1].clone()
+        state["vel_history"][:, 1:] = state["vel_history"][:, :-1].clone()
+        state["pos_history"][:, 0] = pos
+        state["vel_history"][:, 0] = vel
+        state["lag"] = torch.randint(
+            0,
+            self.max_delay_steps + 1,
+            (pos.shape[0],),
+            device=pos.device,
+            dtype=torch.long,
+        )
+
+        episode_length_buf = getattr(env, "episode_length_buf", None)
+        if isinstance(episode_length_buf, torch.Tensor) and episode_length_buf.shape[0] == pos.shape[0]:
+            reset_ids = torch.nonzero(episode_length_buf == 0, as_tuple=False).flatten()
+            if len(reset_ids) > 0:
+                self.reset(env, reset_ids)
+
+        state["last_step"] = step_index
+        return state
+
+    def _select(self, history: torch.Tensor, lag: torch.Tensor, offset: int) -> torch.Tensor:
+        indices = (lag + offset).clamp(max=history.shape[1] - 1)
+        env_ids = torch.arange(history.shape[0], device=history.device)
+        return history[env_ids, indices]
+
+    def _add_position_noise(self, pos: torch.Tensor) -> torch.Tensor:
+        dist = torch.linalg.norm(pos[:, :2], dim=-1, keepdim=True)
+        std = (0.015 * dist).clamp(max=self.max_position_noise)
+        noise = (torch.randn_like(pos) * std).clamp(min=-self.max_position_noise, max=self.max_position_noise)
+        return pos + noise
+
+    def position(self, env: ManagerBasedRlEnv, *, previous: bool, noisy: bool, delayed: bool) -> torch.Tensor:
+        state = self._update(env)
+        lag = state["lag"] if delayed else torch.zeros_like(state["lag"])
+        pos = self._select(state["pos_history"], lag, 1 if previous else 0)
+        return self._add_position_noise(pos) if noisy else pos
+
+    def velocity(self, env: ManagerBasedRlEnv, *, delayed: bool) -> torch.Tensor:
+        state = self._update(env)
+        lag = state["lag"] if delayed else torch.zeros_like(state["lag"])
+        return self._select(state["vel_history"], lag, 0)
+
+
+BALL_OBSERVATION_CACHE = BallObservationCache()
+
+
+def obs_noisy_delayed_ball_pos_heading_frame(env: ManagerBasedRlEnv) -> torch.Tensor:
+    return BALL_OBSERVATION_CACHE.position(env, previous=False, noisy=True, delayed=True)
+
+
+def obs_noisy_delayed_prev_ball_pos_heading_frame(env: ManagerBasedRlEnv) -> torch.Tensor:
+    return BALL_OBSERVATION_CACHE.position(env, previous=True, noisy=True, delayed=True)
+
+
+def obs_delayed_ball_vel_heading_frame(env: ManagerBasedRlEnv) -> torch.Tensor:
+    return BALL_OBSERVATION_CACHE.velocity(env, delayed=True)
+
+
+def obs_prev_ball_pos_heading_frame(env: ManagerBasedRlEnv) -> torch.Tensor:
+    return BALL_OBSERVATION_CACHE.position(env, previous=True, noisy=False, delayed=False)
+
 ##
 # Randomization observations
 ##
@@ -357,12 +463,13 @@ def make_observation_cfg(controlled_joint_names: tuple[str, ...] | None = None, 
             func=mdp.last_action,
         ),
         "ball_pos": ObservationTermCfg(
-            func=obs_ball_pos_heading_frame,
-            params={"outside_info": True},
+            func=obs_noisy_delayed_ball_pos_heading_frame,
+        ),
+        "prev_ball_pos": ObservationTermCfg(
+            func=obs_noisy_delayed_prev_ball_pos_heading_frame,
         ),
         "ball_vel": ObservationTermCfg(
-            func=obs_ball_vel_heading_frame,
-            params={"outside_info": True},
+            func=obs_delayed_ball_vel_heading_frame,
         ),
         "command": ObservationTermCfg(
             func=mdp.generated_commands,
@@ -398,6 +505,9 @@ def make_observation_cfg(controlled_joint_names: tuple[str, ...] | None = None, 
         "ball_pos": ObservationTermCfg(
             func=obs_ball_pos_heading_frame,
             params={"outside_info": True},
+        ),
+        "prev_ball_pos": ObservationTermCfg(
+            func=obs_prev_ball_pos_heading_frame,
         ),
         "ball_vel": ObservationTermCfg(
             func=obs_ball_vel_heading_frame,

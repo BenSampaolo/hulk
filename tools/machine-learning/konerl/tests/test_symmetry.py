@@ -42,12 +42,12 @@ class TestReflectionSpec(unittest.TestCase):
 
 class TestK1SymmetrySpecs(unittest.TestCase):
     def test_k1_spec_dimensions(self) -> None:
-        self.assertEqual(K1_VELOCITY_ACTOR_SPEC.dim, 52)
-        self.assertEqual(K1_VELOCITY_CRITIC_SPEC.dim, 148)
+        self.assertEqual(K1_VELOCITY_ACTOR_SPEC.dim, 61)
+        self.assertEqual(K1_VELOCITY_CRITIC_SPEC.dim, 157)
         self.assertEqual(K1_ACTION_SPEC.dim, 12)
 
-        self.assertEqual(K1_FULL_BODY_VELOCITY_ACTOR_SPEC.dim, 76)
-        self.assertEqual(K1_FULL_BODY_VELOCITY_CRITIC_SPEC.dim, 220)
+        self.assertEqual(K1_FULL_BODY_VELOCITY_ACTOR_SPEC.dim, 85)
+        self.assertEqual(K1_FULL_BODY_VELOCITY_CRITIC_SPEC.dim, 229)
         self.assertEqual(K1_FULL_BODY_ACTION_SPEC.dim, 20)
 
     def test_k1_specs_are_involutions(self) -> None:
@@ -65,9 +65,10 @@ class TestK1SymmetrySpecs(unittest.TestCase):
     def test_gain_blocks_swap_left_right(self) -> None:
         # Critic layout before gains is:
         # base_ang_vel, projected_gravity, q, qd, action, prev_action,
-        # command, base_lin_vel, foot_height, foot_air_time, foot_contact,
-        # foot_contact_forces, trunk_mass, foot_friction, base_com.
-        default_gain_offset = 85
+        # ball_pos, prev_ball_pos, ball_vel, command, base_lin_vel,
+        # foot_height, foot_air_time, foot_contact, foot_contact_forces,
+        # trunk_mass, foot_friction, base_com.
+        default_gain_offset = 94
         default_gain_dim = 24
 
         perm = K1_VELOCITY_CRITIC_SPEC.perm[default_gain_offset : default_gain_offset + default_gain_dim]
@@ -80,7 +81,7 @@ class TestK1SymmetrySpecs(unittest.TestCase):
         self.assertEqual(perm[12], default_gain_offset + 13)
         self.assertEqual(perm[13], default_gain_offset + 12)
 
-        full_body_default_gain_offset = 117
+        full_body_default_gain_offset = 126
         full_body_default_gain_dim = 40
         full_body_perm = K1_FULL_BODY_VELOCITY_CRITIC_SPEC.perm[
             full_body_default_gain_offset : full_body_default_gain_offset + full_body_default_gain_dim

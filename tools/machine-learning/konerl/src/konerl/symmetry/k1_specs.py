@@ -125,6 +125,9 @@ def _actor_spec(joint_spec: ReflectionSpec, action_spec: ReflectionSpec) -> Refl
             joint_spec,  # joint_pos
             joint_spec,  # joint_vel
             action_spec,  # last_action
+            TRUE_VECTOR3,  # ball_pos
+            TRUE_VECTOR3,  # prev_ball_pos
+            TRUE_VECTOR3,  # ball_vel
             COMMAND_SPEC,  # command
         ]
     )
@@ -139,6 +142,9 @@ def _critic_spec(joint_spec: ReflectionSpec, action_spec: ReflectionSpec, gain_s
             joint_spec,  # joint_vel
             action_spec,  # last_action
             action_spec,  # prev_prev_actions
+            TRUE_VECTOR3,  # ball_pos
+            TRUE_VECTOR3,  # prev_ball_pos
+            TRUE_VECTOR3,  # ball_vel
             COMMAND_SPEC,  # command
             TRUE_VECTOR3,  # base_lin_vel
             LEFT_RIGHT_SCALARS,  # foot_height

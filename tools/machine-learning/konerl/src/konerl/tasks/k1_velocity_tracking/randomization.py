@@ -2,15 +2,9 @@ from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.scene_entity_config import SceneEntityCfg
 from mjlab.envs.mdp import events as event_fns, dr
 from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
-from mjlab.entity import Entity
 import torch
 
-from mjlab.utils.lab_api.math import (
-  quat_apply,
-  quat_from_euler_xyz,
-  quat_mul,
-  sample_uniform,
-)
+from mjlab.utils.lab_api.math import sample_uniform
 
 _DEFAULT_ASSET_CFG = SceneEntityCfg("robot")
 
@@ -77,6 +71,13 @@ def reset_ball_relative_to_robot(
         sample_uniform(*velocity_range.get("yaw", (0.0, 0.0)), env_ids.shape, device=env.device),
     ), dim=1)
     ball.write_root_link_velocity_to_sim(torch.cat((lin_vel_w, ang_vel_w), dim=-1), env_ids=env_ids)
+
+    ball_obs_cache = getattr(env, "ball_observation_cache", None)
+    if ball_obs_cache is not None:
+        ball_obs_cache.reset(env, env_ids)
+    kick_detector = getattr(env, "kick_detector", None)
+    if kick_detector is not None:
+        kick_detector.notify_ball_reset(env_ids)
 
 
 class ResetRootStateUniformOnContact:
@@ -151,7 +152,6 @@ def offset_root_state_uniform(
         sample_uniform(*pose_range["z"], env_ids.shape, device=env.device),
     ], dim=1)
 
-    vel_offset = torch.zeros_like(pos_offset)
     current_vel = asset.data.root_link_vel_w[env_ids]
     if velocity_range is not None:
         # 2. Generate 3D linear velocity offset

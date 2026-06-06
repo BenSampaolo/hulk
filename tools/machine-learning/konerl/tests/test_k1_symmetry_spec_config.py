@@ -46,6 +46,9 @@ def _actor_term_specs(joint_spec: ReflectionSpec, action_spec: ReflectionSpec) -
         ("joint_pos", joint_spec),
         ("joint_vel", joint_spec),
         ("actions", action_spec),
+        ("ball_pos", TRUE_VECTOR3),
+        ("prev_ball_pos", TRUE_VECTOR3),
+        ("ball_vel", TRUE_VECTOR3),
         ("command", COMMAND_SPEC),
     ]
 
@@ -62,6 +65,9 @@ def _critic_term_specs(
         ("joint_vel", joint_spec),
         ("actions", action_spec),
         ("prev_prev_actions", action_spec),
+        ("ball_pos", TRUE_VECTOR3),
+        ("prev_ball_pos", TRUE_VECTOR3),
+        ("ball_vel", TRUE_VECTOR3),
         ("command", COMMAND_SPEC),
         ("base_lin_vel", TRUE_VECTOR3),
         ("foot_height", LEFT_RIGHT_SCALARS),
