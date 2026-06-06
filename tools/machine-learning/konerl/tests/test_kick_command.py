@@ -19,10 +19,9 @@ def _make_command(num_envs: int, cfg: KickCommandCfg) -> KickCommand:
     command.behavior_flags = torch.zeros(num_envs, 4)
     command.is_standing_env = torch.zeros(num_envs, dtype=torch.bool)
     command.is_walking_env = torch.zeros(num_envs, dtype=torch.bool)
+    command.is_approach_env = torch.zeros(num_envs, dtype=torch.bool)
     command.is_kicking_env = torch.zeros(num_envs, dtype=torch.bool)
     command.is_dribble_env = torch.zeros(num_envs, dtype=torch.bool)
-    command.gait_frequency = torch.zeros(num_envs)
-    command.gait_process = torch.zeros(num_envs)
     return command
 
 

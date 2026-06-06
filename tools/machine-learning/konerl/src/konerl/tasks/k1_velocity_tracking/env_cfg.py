@@ -11,7 +11,6 @@ def k1_rough_env_cfg(*, play: bool = False, amp: bool = False, control_arms: boo
         cfg.episode_length_s = int(1e9)
 
         cfg.observations["actor"].enable_corruption = True
-        # _ = cfg.events.pop("push_robot", None)
         cfg.events["randomize_terrain"] = EventTermCfg(
             func=envs_mdp.randomize_terrain,
             mode="reset",

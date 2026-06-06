@@ -75,9 +75,6 @@ class KickCommand(CommandTerm):
         self.is_kicking_env = torch.zeros_like(self.is_standing_env)
         self.is_dribble_env = torch.zeros_like(self.is_standing_env)
 
-        self.gait_frequency = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-        self.gait_process = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
-
         self.metrics["error_vel_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_vel_yaw"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["error_kick_acc"] = torch.zeros(self.num_envs, device=self.device)
@@ -85,7 +82,6 @@ class KickCommand(CommandTerm):
         
         self._joystick_enabled: viser.GuiCheckboxHandle | None = None
         self._joystick_sliders: list[viser.GuiSliderHandle] = []
-        self._joystick_gait_freq_slider: viser.GuiSliderHandle | None = None
         self._joystick_get_env_idx: Callable[[], int] | None = None
 
         self._show_ball_pos: viser.GuiCheckboxHandle | None = None
@@ -156,13 +152,6 @@ class KickCommand(CommandTerm):
         self.vel_command_w[env_ids] = 0.0
         self.kick_direction_command_b[env_ids] = 0.0
         self.kick_direction_command_w[env_ids] = 0.0
-
-        is_gaiting = self.is_approach_env[env_ids] | self.is_walking_env[env_ids]
-        self.gait_frequency[env_ids] = torch.where(
-            is_gaiting,
-            sample_uniform(self.cfg.ranges.gait_frequency),
-            torch.zeros_like(self.gait_frequency[env_ids], device=self.device)
-        )
 
         self.vel_command_b[env_ids, 0] = torch.where(
             self.is_walking_env[env_ids],
@@ -313,18 +302,8 @@ class KickCommand(CommandTerm):
                 for slider in sliders:
                     slider.value = 0.0
 
-            # Add Gait Frequency Slider
-            gait_freq_slider = server.gui.add_slider(
-                "gait_freq",
-                min=0.5,
-                max=5.0,
-                step=0.1,
-                initial_value=1.0,
-            )
-        
         self._joystick_enabled = enabled
         self._joystick_sliders = sliders
-        self._joystick_gait_freq_slider = gait_freq_slider
         self._joystick_get_env_idx = get_env_idx
         
         with server.gui.add_folder("Debug Visualization"):
@@ -342,31 +321,10 @@ class KickCommand(CommandTerm):
             for i, s in enumerate(self._joystick_sliders):
                 if i < self.vel_command_b.shape[1]:
                     self.vel_command_b[idx, i] = s.value
-            if self._joystick_gait_freq_slider is not None:
-                self.gait_frequency[idx] = self._joystick_gait_freq_slider.value
-
         kicking_env_ids = self.is_kicking_env.nonzero(as_tuple=False).flatten()
         self.vel_command_b[kicking_env_ids, :] = 0.0
         self.vel_command_w[kicking_env_ids, :] = 0.0
 
-        # Dynamically suppress gait frequency if velocity command is below threshold (0.05)
-        vel_norms = torch.norm(self.vel_command_b, dim=-1)
-        
-        # Add the offset from the GaitFrequencyAction if it exists
-        action_offset = torch.zeros_like(self.gait_frequency)
-        if "gait_frequency" in self._env.action_manager.active_terms:
-            gait_action = self._env.action_manager.get_term("gait_frequency")
-            action_offset = getattr(gait_action, "freq_offset").squeeze(-1)
-
-        effective_gait_freq = torch.where(
-            vel_norms < 0.05,
-            torch.zeros_like(self.gait_frequency),
-            self.gait_frequency + action_offset
-        )
-        
-        # Advance gait process
-        self.gait_process[:] = torch.fmod(self.gait_process + dt * effective_gait_freq, 1.0)
-    
     def _debug_vis_impl(self, visualizer: "DebugVisualizer") -> None:
         # Visualize the velocity command as an arrow in the robot's local frame
         
@@ -563,7 +521,6 @@ class KickCommandCfg(CommandTermCfg):
         kick_vel: tuple[float, float] = (0.8, 2.5)
         kick_lateral_offset: tuple[float, float] = (-0.2, 0.2)
         kick_elevation: tuple[float, float] = (0.0, math.pi / 4.0)
-        gait_frequency: tuple[float, float] = (1.0, 2.0)  # steps per second
     
     ranges: Ranges
 

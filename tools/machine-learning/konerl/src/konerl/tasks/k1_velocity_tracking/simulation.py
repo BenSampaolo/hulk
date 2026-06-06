@@ -4,7 +4,7 @@ from typing import Literal
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.scene import SceneCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
-from mjlab.sensor.terrain_height_sensor import TerrainHeightSensor, TerrainHeightSensorCfg
+from mjlab.sensor.terrain_height_sensor import TerrainHeightSensorCfg
 from mjlab.sim import MujocoCfg, SimulationCfg
 import mjlab.terrains as terrain_gen
 from mjlab.terrains import TerrainEntityCfg
@@ -14,7 +14,6 @@ from mjlab.viewer import ViewerConfig
 from mjlab.sensor import (
   GridPatternCfg,
   ObjRef,
-  TerrainHeightSensorCfg,
 )
 
 from konerl.k1_config import get_k1_robot_cfg
@@ -66,8 +65,6 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"], *, control_a
     else:
         raise ValueError(f"unknown terrain: {terrain_type}")
     
-    ball_observation_marker = ()
-
     feet_ground_cfg = ContactSensorCfg(
         name="feet_ground_contact",
         primary=ContactMatch(
