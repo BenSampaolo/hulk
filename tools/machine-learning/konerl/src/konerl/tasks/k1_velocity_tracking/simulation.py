@@ -45,7 +45,7 @@ BUMPY_TERRAINS_CFG = TerrainGeneratorCfg(
   add_lights=True,
 )
 
-def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"], *, control_arms: bool = False) -> SceneCfg:
+def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"], *, control_arms: bool = True) -> SceneCfg:
     if terrain_type == "flat":
         terrain_cfg = TerrainEntityCfg()
     elif terrain_type == "rough":
@@ -149,7 +149,7 @@ def make_scene_cfg(terrain_type: Literal["flat", "rough", "bumpy"], *, control_a
     )
 
 
-def make_velocity_env_cfg(play: bool, *, amp: bool = False, control_arms: bool = False) -> ManagerBasedRlEnvCfg:
+def make_velocity_env_cfg(play: bool, *, amp: bool = False, control_arms: bool = True) -> ManagerBasedRlEnvCfg:
     if play:
         terrain_type = "flat"
     else:
