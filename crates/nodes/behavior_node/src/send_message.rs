@@ -99,6 +99,7 @@ impl Blackboard {
         let message = HulkMessage::State(StateMessage {
             player_number: self.world_state.robot.player_number,
             pose,
+            head_yaw: self.head_yaw,
             ball_position,
         });
 

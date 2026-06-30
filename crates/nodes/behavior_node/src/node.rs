@@ -5,6 +5,7 @@ use color_eyre::Result;
 
 use coordinate_systems::{Field, Ground};
 use hsl_network_messages::PlayerNumber;
+use kinematics::joints::head::HeadJoints;
 use linear_algebra::{Isometry2, Point2, Pose2, Vector2};
 use ros_z::{prelude::*, qos::QosDurability, time::Time};
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,7 @@ pub struct Blackboard {
     pub last_motion_command: MotionCommand,
     pub last_motion_switch_time: Time,
     pub last_motion_type: Option<MotionType>,
+    pub head_yaw: f32,
     pub last_sent_game_controller_return_message_time: Option<Time>,
     pub last_sent_hsl_message_time: Option<Time>,
     pub last_closest_to_ball: bool,
@@ -214,6 +216,16 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         .cache(1)
         .build()
         .await?;
+    let suggested_search_look_at_cache = node
+        .subscriber::<Option<Point2<Field>>>("suggested_search_look_at")
+        .cache(1)
+        .build()
+        .await?;
+    let head_joints_command_cache = node
+        .subscriber::<HeadJoints<f32>>("head_joints_command")
+        .cache(1)
+        .build()
+        .await?;
     let additional_behavior_trace_pub = node
         .publisher::<NodeTrace>("behavior/trace")
         .build()
@@ -266,6 +278,7 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         last_motion_command: MotionCommand::default(),
         last_motion_switch_time: Time::zero(),
         last_motion_type: None,
+        head_yaw: 0.0,
         last_sent_game_controller_return_message_time: None,
         last_sent_hsl_message_time: None,
         last_closest_to_ball: false,
@@ -348,6 +361,13 @@ pub async fn run(ctx: Arc<Context>) -> Result<()> {
         blackboard.world_state.suggested_search_position = suggested_search_position_cache
             .get_latest()
             .map(|position| *position);
+        blackboard.world_state.suggested_search_look_at = suggested_search_look_at_cache
+            .get_latest()
+            .and_then(|look_at| *look_at);
+        blackboard.head_yaw = head_joints_command_cache
+            .get_latest()
+            .map(|joints| joints.yaw)
+            .unwrap_or_default();
 
         if let Some(ball) = blackboard.world_state.ball {
             blackboard.ball = Some(LastBall {

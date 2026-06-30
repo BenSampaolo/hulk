@@ -102,6 +102,7 @@ impl Behavior {
         let message = HulkMessage::State(StateMessage {
             player_number: world_state.robot.player_number,
             pose,
+            head_yaw: 0.0,
             ball_position,
         });
 

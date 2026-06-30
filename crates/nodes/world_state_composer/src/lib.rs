@@ -77,6 +77,10 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .subscriber::<Point2<Field>>("suggested_search_position")
         .build()
         .await?;
+    let _suggested_search_look_at_sub = node
+        .subscriber::<Option<Point2<Field>>>("suggested_search_look_at")
+        .build()
+        .await?;
     let _world_state_pub = node.publisher::<WorldState>("world_state").build().await?;
 
     pending::<()>().await;

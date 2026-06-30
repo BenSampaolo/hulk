@@ -41,6 +41,7 @@ pub struct CycleContext {
     rule_ball: Input<Option<BallState>, "rule_ball_state?">,
     rule_obstacles: Input<Vec<RuleObstacle>, "rule_obstacles">,
     suggested_search_position: Input<Option<Point2<Field>>, "suggested_search_position?">,
+    suggested_search_look_at: Input<Option<Point2<Field>>, "suggested_search_look_at?">,
     player_states: Input<Players<Option<PlayerState>>, "player_states">,
 
     player_number: Parameter<PlayerNumber, "player_number">,
@@ -77,6 +78,7 @@ impl WorldStateComposer {
             rule_ball: context.rule_ball.copied(),
             rule_obstacles: context.rule_obstacles.clone(),
             suggested_search_position: context.suggested_search_position.copied(),
+            suggested_search_look_at: context.suggested_search_look_at.copied(),
         };
 
         Ok(MainOutputs {
