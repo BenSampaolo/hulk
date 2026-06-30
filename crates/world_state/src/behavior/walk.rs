@@ -24,11 +24,11 @@ use crate::{
     selection, sequence, subtree,
 };
 
-pub fn plan(
+pub fn try_plan(
     blackboard: &mut Blackboard,
     target_in_ground: Point2<Ground>,
     ground_to_field: Isometry2<Ground, Field>,
-) -> Path {
+) -> Option<Path> {
     let parameters: &types::parameters::PathPlanningParameters =
         &blackboard.parameters.path_planning;
     let field_dimensions = blackboard.field_dimensions;
@@ -78,16 +78,26 @@ pub fn plan(
         .plan(Point::origin(), clamped_target_in_robot)
         .unwrap();
     blackboard.path_obstacles_output = planner.obstacles;
-    path.unwrap_or_else(|| direct_path(Point::origin(), target_in_ground))
+    path
 }
 
-pub fn walk_to(
+pub fn plan(
+    blackboard: &mut Blackboard,
+    target_in_ground: Point2<Ground>,
+    ground_to_field: Isometry2<Ground, Field>,
+) -> Path {
+    try_plan(blackboard, target_in_ground, ground_to_field)
+        .unwrap_or_else(|| direct_path(Point::origin(), target_in_ground))
+}
+
+fn walk_to_impl(
     blackboard: &mut Blackboard,
     target_pose: Pose2<Ground>,
     maximal_walk_speed: f32,
     orientation_mode: OrientationMode,
     distance_to_be_aligned: f32,
     hysteresis: nalgebra::Vector2<f32>,
+    require_plannable_path: bool,
 ) -> Status {
     if let Some(ground_to_field) = blackboard.world_state.robot.ground_to_field {
         let parameters = &blackboard.parameters.walk_and_stand;
@@ -119,7 +129,14 @@ pub fn walk_to(
             blackboard.body_motion = Some(BodyMotion::Stand);
             Status::Success
         } else {
-            let path = plan(blackboard, target_pose.position(), ground_to_field);
+            let path = if require_plannable_path {
+                match try_plan(blackboard, target_pose.position(), ground_to_field) {
+                    Some(path) => path,
+                    None => return Status::Failure,
+                }
+            } else {
+                plan(blackboard, target_pose.position(), ground_to_field)
+            };
             blackboard.body_motion = Some(BodyMotion::Walk {
                 path,
                 orientation_mode,
@@ -132,6 +149,44 @@ pub fn walk_to(
     } else {
         Status::Failure
     }
+}
+
+pub fn walk_to(
+    blackboard: &mut Blackboard,
+    target_pose: Pose2<Ground>,
+    maximal_walk_speed: f32,
+    orientation_mode: OrientationMode,
+    distance_to_be_aligned: f32,
+    hysteresis: nalgebra::Vector2<f32>,
+) -> Status {
+    walk_to_impl(
+        blackboard,
+        target_pose,
+        maximal_walk_speed,
+        orientation_mode,
+        distance_to_be_aligned,
+        hysteresis,
+        false,
+    )
+}
+
+fn walk_to_if_path_plannable(
+    blackboard: &mut Blackboard,
+    target_pose: Pose2<Ground>,
+    maximal_walk_speed: f32,
+    orientation_mode: OrientationMode,
+    distance_to_be_aligned: f32,
+    hysteresis: nalgebra::Vector2<f32>,
+) -> Status {
+    walk_to_impl(
+        blackboard,
+        target_pose,
+        maximal_walk_speed,
+        orientation_mode,
+        distance_to_be_aligned,
+        hysteresis,
+        true,
+    )
 }
 
 pub fn walk_to_ball(blackboard: &mut Blackboard) -> Status {
@@ -147,7 +202,7 @@ pub fn walk_to_ball(blackboard: &mut Blackboard) -> Status {
         let target_position = ball_in_ground
             - (goal_position - ball_in_ground).normalize()
                 * blackboard.parameters.kicking.kick_position_ball_distance;
-        walk_to(
+        walk_to_if_path_plannable(
             blackboard,
             Pose2::from_parts(target_position, orientation),
             blackboard.parameters.walk_speed.kicking,
