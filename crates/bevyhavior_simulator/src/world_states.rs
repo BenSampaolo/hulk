@@ -125,6 +125,7 @@ pub fn build_world_states(
                 rule_obstacles,
                 fall_down_state: fall_down_state.fall_down_state,
                 suggested_search_position: suggested_search_position.position,
+                suggested_search_look_at: None,
             },
         );
     }
@@ -256,6 +257,7 @@ mod tests {
         HulkMessage::State(hsl_network_messages::StateMessage {
             player_number,
             pose: Pose2::new(point![x, y], 0.0),
+            head_yaw: 0.0,
             ball_position: Some(hsl_network_messages::BallPosition {
                 age: Duration::from_millis(500),
                 position: point![x + 1.0, y],

@@ -170,6 +170,7 @@ fn create_behavior_blackboard(parameters: BehaviorParameters) -> BehaviorBlackbo
         last_motion_command: MotionCommand::default(),
         last_motion_switch_time: ros_z::time::Time::zero(),
         last_motion_type: None,
+        head_yaw: 0.0,
         last_sent_game_controller_return_message_time: None,
         last_sent_hsl_message_time: None,
         last_closest_to_ball: false,
