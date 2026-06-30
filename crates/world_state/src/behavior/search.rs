@@ -1,7 +1,7 @@
-use linear_algebra::{Pose2, vector};
+use linear_algebra::{Orientation2, Pose2, vector};
 use types::{
     behavior_tree::Status,
-    motion_command::{BodyMotion, MotionCommand, OrientationMode},
+    motion_command::{BodyMotion, HeadMotion, ImageRegion, MotionCommand, OrientationMode},
 };
 
 use crate::behavior::{node::Blackboard, walk::walk_to};
@@ -49,12 +49,39 @@ pub fn walk_to_search_position(blackboard: &mut Blackboard) -> Status {
         blackboard.world_state.robot.ground_to_field,
     ) {
         let search_position_in_ground = ground_to_field.inverse() * search_position;
+        let look_at_in_ground = blackboard
+            .world_state
+            .suggested_search_look_at
+            .map(|look_at| ground_to_field.inverse() * look_at);
+        let target_pose = look_at_in_ground
+            .and_then(|target| {
+                let final_view_direction = target - search_position_in_ground;
+                (final_view_direction.norm() > f32::EPSILON).then(|| {
+                    Pose2::from_parts(
+                        search_position_in_ground,
+                        Orientation2::from_vector(final_view_direction),
+                    )
+                })
+            })
+            .unwrap_or_else(|| Pose2::from(search_position_in_ground));
+        let orientation_mode = look_at_in_ground
+            .map(|target| OrientationMode::LookAt {
+                target,
+                tolerance: blackboard.parameters.walk_and_stand.orientation_tolerance,
+            })
+            .unwrap_or(OrientationMode::AlignWithPath);
+        if let Some(target) = look_at_in_ground {
+            blackboard.head_motion = Some(HeadMotion::LookAt {
+                target,
+                image_region_target: ImageRegion::Center,
+            });
+        }
 
         return walk_to(
             blackboard,
-            Pose2::from(search_position_in_ground),
+            target_pose,
             blackboard.parameters.walk_speed.search,
-            OrientationMode::AlignWithPath,
+            orientation_mode,
             blackboard
                 .parameters
                 .walk_and_stand
