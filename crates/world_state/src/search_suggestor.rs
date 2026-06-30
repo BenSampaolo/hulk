@@ -160,28 +160,16 @@ impl SearchSuggestor {
 
         let messages = get_hsl_messages(&context.network_message.persistent);
         for (time, message) in messages {
-            self.heatmap.add_teamballs(
-                time,
-                message,
-                context.search_suggestor_configuration.team_ball_weight,
-            );
+            self.heatmap
+                .add_teamballs(time, message, &context.search_suggestor_configuration);
         }
 
         if context.ball_position.is_none()
             && let Some(ground_to_field) = context.ground_to_field
         {
-            let robot_position = ground_to_field.as_pose().position().coords();
-            let body_orientation = ground_to_field.orientation().angle();
-            let fov_angle_offset = 45.0 * consts::PI / 180.0;
-            let left_angle = body_orientation - fov_angle_offset;
-            let right_angle = body_orientation + fov_angle_offset;
-            let left_edge: Vector2<Field> = vector!(left_angle.cos(), left_angle.sin());
-            let right_edge: Vector2<Field> = vector!(right_angle.cos(), right_angle.sin());
-
-            self.heatmap.decay_tiles_in_fov(
-                robot_position,
-                left_edge,
-                right_edge,
+            self.heatmap.decay_tiles_in_robot_fov(
+                ground_to_field.as_pose().position().coords(),
+                ground_to_field.orientation().angle(),
                 context.search_suggestor_configuration.decay_distance_factor,
                 context
                     .search_suggestor_configuration
@@ -248,19 +236,56 @@ impl Heatmap {
         None
     }
 
-    fn add_teamballs(&mut self, time: SystemTime, message: HulkMessage, team_ball_weight: f32) {
-        let ball = match message {
-            HulkMessage::State(StateMessage { ball_position, .. }) => {
-                ball_position.map(|ball| BallPosition {
-                    position: ball.position,
-                    velocity: Vector2::zeros(),
-                    last_seen: Time::from_wallclock(time) - ball.age,
-                })
-            }
-        };
-        if let Some(ball_position) = ball {
-            self[ball_position.position] = team_ball_weight;
+    fn add_teamballs(
+        &mut self,
+        time: SystemTime,
+        message: HulkMessage,
+        parameters: &SearchSuggestorParameters,
+    ) {
+        let HulkMessage::State(StateMessage {
+            pose,
+            head_yaw,
+            ball_position,
+            ..
+        }) = message;
+
+        if let Some(ball) = ball_position {
+            let ball_position = BallPosition {
+                position: ball.position,
+                velocity: Vector2::zeros(),
+                last_seen: Time::from_wallclock(time) - ball.age,
+            };
+            self[ball_position.position] = parameters.team_ball_weight;
+        } else {
+            self.decay_tiles_in_robot_fov(
+                pose.position().coords(),
+                pose.angle() + head_yaw,
+                parameters.decay_distance_factor,
+                parameters.heatmap_decay_range.clone(),
+            );
         }
+    }
+
+    fn decay_tiles_in_robot_fov(
+        &mut self,
+        robot_position: Vector2<Field>,
+        viewing_orientation: f32,
+        decay_distance_factor: f32,
+        heatmap_decay_range: Range<f32>,
+    ) {
+        let fov_angle_offset = 45.0 * consts::PI / 180.0;
+        let left_angle = viewing_orientation - fov_angle_offset;
+        let right_angle = viewing_orientation + fov_angle_offset;
+        let left_edge: Vector2<Field> = vector!(left_angle.cos(), left_angle.sin());
+        let right_edge: Vector2<Field> = vector!(right_angle.cos(), right_angle.sin());
+
+        self.decay_tiles_in_fov(
+            robot_position,
+            left_edge,
+            right_edge,
+            decay_distance_factor,
+            heatmap_decay_range,
+        );
     }
 
     fn decay_tiles_in_fov(

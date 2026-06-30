@@ -524,7 +524,6 @@ pub struct CameraMatrixParameters {
 #[derive(
     Clone,
     Debug,
-    Default,
     Deserialize,
     Serialize,
     PathSerialize,
@@ -533,6 +532,7 @@ pub struct CameraMatrixParameters {
     ros_z::Message,
 )]
 pub struct SearchSuggestorParameters {
+    pub goal_keeper_number: PlayerNumber,
     pub cells_per_meter: f32,
     pub heatmap_convolution_kernel_weight: f32,
     pub minimum_validity: f32,
@@ -540,9 +540,37 @@ pub struct SearchSuggestorParameters {
     pub team_ball_weight: f32,
     pub rule_ball_weight: f32,
     pub rule_ball_weight_increment: f32,
+    pub recovery_duration: Duration,
+    pub recovery_minimum_factor: f32,
+    pub recovery_gaussian_sigma: f32,
     pub tile_switch_hysteresis: f32,
     pub decay_distance_factor: f32,
     pub heatmap_decay_range: Range<f32>,
+    pub heatmap_full_decay_distance: f32,
+    pub heatmap_decay_falloff_distance: f32,
+}
+
+impl Default for SearchSuggestorParameters {
+    fn default() -> Self {
+        Self {
+            goal_keeper_number: PlayerNumber::One,
+            cells_per_meter: 0.0,
+            heatmap_convolution_kernel_weight: 0.0,
+            minimum_validity: 0.0,
+            own_ball_weight: 0.0,
+            team_ball_weight: 0.0,
+            rule_ball_weight: 0.0,
+            rule_ball_weight_increment: 0.0,
+            recovery_duration: Duration::from_secs(20),
+            recovery_minimum_factor: 0.4,
+            recovery_gaussian_sigma: 3.0,
+            tile_switch_hysteresis: 0.0,
+            decay_distance_factor: 0.0,
+            heatmap_decay_range: 0.0..0.0,
+            heatmap_full_decay_distance: 3.0,
+            heatmap_decay_falloff_distance: 2.0,
+        }
+    }
 }
 
 #[derive(
