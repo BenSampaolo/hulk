@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     f32::consts,
     ops::{Index, IndexMut, Range},
     time::SystemTime,
@@ -9,7 +10,7 @@ use context_attribute::context;
 use coordinate_systems::{Field, Ground};
 use framework::{AdditionalOutput, MainOutput, PerceptionInput};
 use geometry::direction::{Direction, Rotate90Degrees};
-use hsl_network_messages::{HulkMessage, StateMessage, SubState, Team};
+use hsl_network_messages::{HulkMessage, PlayerNumber, StateMessage, SubState, Team};
 use itertools::Itertools;
 use linear_algebra::{Isometry2, Point2, Vector2, point, vector};
 use nalgebra::clamp;
@@ -19,6 +20,7 @@ use ros_z::time::Time;
 use serde::{Deserialize, Serialize};
 use types::{
     ball_position::{BallPosition, HypotheticalBallPosition},
+    cycle_time::CycleTime,
     field_dimensions::{FieldDimensions, Half, Side},
     filtered_game_controller_state::FilteredGameControllerState,
     messages::IncomingMessage,
@@ -44,6 +46,7 @@ pub struct CycleContext {
     search_suggestor_configuration: Parameter<SearchSuggestorParameters, "search_suggestor">,
     field_dimensions: Parameter<FieldDimensions, "field_dimensions">,
 
+    cycle_time: Input<CycleTime, "cycle_time">,
     ball_position: Input<Option<BallPosition<Ground>>, "ball_position?">,
     hypothetical_ball_positions:
         Input<Vec<HypotheticalBallPosition<Ground>>, "hypothetical_ball_positions">,
@@ -158,10 +161,29 @@ impl SearchSuggestor {
             }
         }
 
-        let messages = get_hsl_messages(&context.network_message.persistent);
-        for (time, message) in messages {
-            self.heatmap
-                .add_teamballs(time, message, &context.search_suggestor_configuration);
+        let mut latest_messages = HashMap::<PlayerNumber, (SystemTime, HulkMessage)>::new();
+        for (time, message) in get_hsl_messages(&context.network_message.persistent) {
+            let HulkMessage::State(StateMessage { player_number, .. }) = message;
+            if latest_messages
+                .get(&player_number)
+                .is_none_or(|(latest_time, _)| time > *latest_time)
+            {
+                latest_messages.insert(player_number, (time, message));
+            }
+        }
+        let now = context.cycle_time.start_time;
+        for (time, message) in latest_messages.into_values() {
+            if should_apply_team_message(
+                time,
+                message,
+                now,
+                context
+                    .search_suggestor_configuration
+                    .teammate_fov_decay_duration,
+            ) {
+                self.heatmap
+                    .add_teamballs(time, message, &context.search_suggestor_configuration);
+            }
         }
 
         if context.ball_position.is_none()
@@ -178,11 +200,14 @@ impl SearchSuggestor {
             );
         }
 
-        let kernel = create_kernel(
-            context
-                .search_suggestor_configuration
-                .heatmap_convolution_kernel_weight,
-        );
+        let alpha = context
+            .search_suggestor_configuration
+            .heatmap_convolution_kernel_weight;
+        let kernel = array![
+            [alpha, alpha, alpha],
+            [alpha, 1.0 - alpha, alpha],
+            [alpha, alpha, alpha]
+        ] / (1.0 + 7.0 * alpha);
         self.heatmap.map = self
             .heatmap
             .map
@@ -193,12 +218,17 @@ impl SearchSuggestor {
     }
 }
 
-fn create_kernel(alpha: f32) -> Array2<f32> {
-    array![
-        [alpha, alpha, alpha],
-        [alpha, 1.0 - alpha, alpha],
-        [alpha, alpha, alpha]
-    ] / (1.0 + 7.0 * alpha)
+fn should_apply_team_message(
+    time: SystemTime,
+    message: HulkMessage,
+    now: SystemTime,
+    teammate_fov_decay_duration: std::time::Duration,
+) -> bool {
+    let HulkMessage::State(StateMessage { ball_position, .. }) = message;
+    ball_position.is_some()
+        || now
+            .duration_since(time)
+            .is_ok_and(|age| age < teammate_fov_decay_duration)
 }
 
 #[derive(Deserialize, Serialize)]

@@ -212,7 +212,9 @@ impl Heatmap {
         if is_ball_not_free(filtered_game_controller_state) {
             let rule_ball_hypothesis_indices =
                 self.rule_ball_hypothesis_indices(*field_dimensions, rule_ball_hypotheses);
-            self.apply_rule_ball_hypothesis_mask(rule_ball_hypothesis_indices);
+            if !rule_ball_hypothesis_indices.is_empty() {
+                self.apply_rule_ball_hypothesis_mask(rule_ball_hypothesis_indices);
+            }
             return;
         }
 
@@ -244,7 +246,9 @@ impl Heatmap {
         );
         let rule_ball_hypothesis_indices =
             self.rule_ball_hypothesis_indices(*field_dimensions, rule_ball_hypotheses);
-        self.apply_rule_ball_hypothesis_mask(rule_ball_hypothesis_indices);
+        if !rule_ball_hypothesis_indices.is_empty() {
+            self.apply_rule_ball_hypothesis_mask(rule_ball_hypothesis_indices);
+        }
 
         let recovery_duration_seconds = recovery_duration.as_secs_f32();
         if recovery_duration_seconds <= 0.0 {
@@ -315,28 +319,6 @@ impl Heatmap {
             network_message.time.to_wallclock(),
             message,
             parameters,
-            None,
-        )
-    }
-
-    pub(crate) fn update_with_team_ball_with_obstacles(
-        &mut self,
-        field_dimensions: FieldDimensions,
-        network_message: TimeWrapper<IncomingMessage>,
-        parameters: &SearchSuggestorParameters,
-        obstacles: &[Obstacle],
-        ground_to_field: Isometry2<Ground, Field>,
-    ) -> Option<Point2<Field>> {
-        let IncomingMessage::Hsl(message) = network_message.inner else {
-            return None;
-        };
-        let field_obstacles = field_obstacles_from_ground_obstacles(obstacles, ground_to_field);
-        self.add_teamballs(
-            field_dimensions,
-            network_message.time.to_wallclock(),
-            message,
-            parameters,
-            Some(&field_obstacles),
         )
     }
 
@@ -530,7 +512,11 @@ impl Heatmap {
     }
 
     pub fn apply_convolution(&mut self, alpha: f32) -> Result<()> {
-        let kernel = create_kernel(alpha);
+        let kernel = array![
+            [alpha, alpha, alpha],
+            [alpha, 1.0 - alpha, alpha],
+            [alpha, alpha, alpha]
+        ] / (1.0 + 7.0 * alpha);
         self.map = self
             .map
             .conv(&kernel, ConvMode::Same, PaddingMode::Replicate)
@@ -915,14 +901,8 @@ impl Heatmap {
         time: SystemTime,
         message: HulkMessage,
         parameters: &SearchSuggestorParameters,
-        field_obstacles: Option<&[FieldObstacle]>,
     ) -> Option<Point2<Field>> {
-        let HulkMessage::State(StateMessage {
-            pose,
-            head_yaw,
-            ball_position,
-            ..
-        }) = message;
+        let HulkMessage::State(StateMessage { ball_position, .. }) = message;
 
         if let Some(ball) = ball_position {
             self.active_rule_ball_hypotheses.clear();
@@ -937,28 +917,6 @@ impl Heatmap {
             self.map[heatmap_point] = clamp_heatmap_value(parameters.team_ball_weight);
             Some(field_ball_position)
         } else {
-            if let Some(field_obstacles) = field_obstacles {
-                self.decay_tiles_in_robot_fov_with_field_obstacles(
-                    field_dimensions,
-                    pose.position().coords(),
-                    pose.angle() + head_yaw,
-                    parameters.decay_distance_factor,
-                    parameters.heatmap_decay_range.clone(),
-                    parameters.heatmap_full_decay_distance,
-                    parameters.heatmap_decay_falloff_distance,
-                    field_obstacles,
-                );
-            } else {
-                self.decay_tiles_in_robot_fov(
-                    field_dimensions,
-                    pose.position().coords(),
-                    pose.angle() + head_yaw,
-                    parameters.decay_distance_factor,
-                    parameters.heatmap_decay_range.clone(),
-                    parameters.heatmap_full_decay_distance,
-                    parameters.heatmap_decay_falloff_distance,
-                );
-            }
             None
         }
     }
@@ -973,14 +931,6 @@ fn heatmap_index_to_field(
         ((heatmap_point.0 as f32 + 1.0 / 2.0) / cells_per_meter - field_dimensions.length / 2.0),
         ((heatmap_point.1 as f32 + 1.0 / 2.0) / cells_per_meter - field_dimensions.width / 2.0)
     ]
-}
-
-fn create_kernel(alpha: f32) -> Array2<f32> {
-    array![
-        [alpha, alpha, alpha],
-        [alpha, 1.0 - alpha, alpha],
-        [alpha, alpha, alpha]
-    ] / (1.0 + 7.0 * alpha)
 }
 
 fn clamp_heatmap_value(value: f32) -> f32 {
@@ -1417,6 +1367,38 @@ mod tests {
     }
 
     #[test]
+    fn unknown_non_free_rule_ball_hypothesis_does_not_clear_heatmap() {
+        let field_dimensions = FieldDimensions::SPL_2025;
+        let parameters = SearchSuggestorParameters::default();
+        let mut heatmap = Heatmap::new_uniform(field_dimensions, 1.0);
+        heatmap.map.fill(0.5);
+        let filtered_game_controller_state = FilteredGameControllerState {
+            game_state: FilteredGameState::Playing {
+                ball_is_free: false,
+                kick_off: false,
+            },
+            sub_state: Some(SubState::DirectFreeKick),
+            ..Default::default()
+        };
+
+        heatmap.update_with_rule_ball(
+            &filtered_game_controller_state,
+            &field_dimensions,
+            &PrimaryState::Playing,
+            &parameters,
+        );
+        heatmap.recover_rule_ball_uncertainty(
+            &filtered_game_controller_state,
+            &field_dimensions,
+            &PrimaryState::Playing,
+            Duration::from_secs(5),
+            Duration::from_secs(10),
+        );
+
+        assert!(heatmap.map.iter().all(|value| *value == 0.5));
+    }
+
+    #[test]
     fn changed_non_free_rule_ball_hypothesis_initializes_new_cells_to_full_value() {
         let field_dimensions = FieldDimensions::SPL_2025;
         let parameters = SearchSuggestorParameters::default();
@@ -1607,18 +1589,14 @@ mod tests {
             active_rule_ball_hypotheses: Vec::new(),
         };
 
-        heatmap.update_with_team_ball(
+        heatmap.decay_tiles_in_robot_fov(
             field_dimensions,
-            TimeWrapper {
-                time: ros_z::time::Time::zero(),
-                inner: IncomingMessage::Hsl(HulkMessage::State(StateMessage {
-                    player_number: PlayerNumber::Two,
-                    pose: Pose2::new(point![0.0, 0.0], 0.0),
-                    head_yaw: FRAC_PI_2,
-                    ball_position: None,
-                })),
-            },
-            &parameters,
+            vector![0.0, 0.0],
+            FRAC_PI_2,
+            parameters.decay_distance_factor,
+            parameters.heatmap_decay_range.clone(),
+            parameters.heatmap_full_decay_distance,
+            parameters.heatmap_decay_falloff_distance,
         );
 
         let visible_tile = heatmap.field_to_heatmap(field_dimensions, point![0.0, 1.0]);
@@ -1650,18 +1628,14 @@ mod tests {
             radius_at_hip_height: 0.4,
         }];
 
-        heatmap.update_with_team_ball_with_obstacles(
+        heatmap.decay_tiles_in_robot_fov_with_obstacles(
             field_dimensions,
-            TimeWrapper {
-                time: ros_z::time::Time::zero(),
-                inner: IncomingMessage::Hsl(HulkMessage::State(StateMessage {
-                    player_number: PlayerNumber::Two,
-                    pose: Pose2::new(point![0.0, 0.0], 0.0),
-                    head_yaw: 0.0,
-                    ball_position: None,
-                })),
-            },
-            &parameters,
+            vector![0.0, 0.0],
+            0.0,
+            parameters.decay_distance_factor,
+            parameters.heatmap_decay_range.clone(),
+            parameters.heatmap_full_decay_distance,
+            parameters.heatmap_decay_falloff_distance,
             &obstacles,
             Isometry2::identity(),
         );

@@ -17,5 +17,6 @@
   },
   heatmap_full_decay_distance: 3.0,
   heatmap_decay_falloff_distance: 2.0,
-  tile_switch_hysteresis: 0.6
+  tile_switch_hysteresis: 0.6,
+  teammate_fov_decay_duration: { nanos: 0, secs: 1 }
 }

@@ -25,6 +25,13 @@ use types::{
 pub mod heatmap;
 use heatmap::Heatmap;
 
+#[derive(Clone, Copy)]
+struct TeammateFovDecay {
+    pose: Pose2<Field>,
+    head_yaw: f32,
+    received_at: Instant,
+}
+
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(run(ctx))
 }
@@ -125,6 +132,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
     let mut latest_filtered_game_controller_state = None;
     let mut latest_obstacles = Vec::new();
     let mut teammate_poses = HashMap::new();
+    let mut active_teammate_fov_decays = HashMap::new();
 
     loop {
         let parameters_snapshot = parameters.snapshot();
@@ -138,6 +146,9 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             .map(|player_number| *player_number);
         let primary_state = primary_state_cache.get_latest();
         let primary_state = primary_state.as_deref();
+        if let Some(own_player_number) = own_player_number {
+            active_teammate_fov_decays.remove(&own_player_number);
+        }
         let mut ball_was_seen = false;
 
         while ball_position_sub.is_ready() {
@@ -168,18 +179,15 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         while network_message_sub.is_ready() {
             let network_message = network_message_sub.recv().await?;
             update_latest_teammate_pose(&network_message, own_player_number, &mut teammate_poses);
-            let team_ball_position = if let Some(ground_to_field) = ground_to_field {
-                heatmap.update_with_team_ball_with_obstacles(
-                    field_dimensions,
-                    network_message,
-                    parameters,
-                    &latest_obstacles,
-                    ground_to_field,
-                )
-            } else {
+            update_active_teammate_fov_decay(
+                &network_message,
+                own_player_number,
+                Instant::now(),
+                &mut active_teammate_fov_decays,
+            );
+            if let Some(team_ball_position) =
                 heatmap.update_with_team_ball(field_dimensions, network_message, parameters)
-            };
-            if let Some(team_ball_position) = team_ball_position {
+            {
                 ball_was_seen = true;
                 last_known_ball_position = Some(team_ball_position);
             }
@@ -244,6 +252,16 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             );
         }
 
+        decay_active_teammate_fovs(
+            &mut heatmap,
+            field_dimensions,
+            now,
+            parameters,
+            &mut active_teammate_fov_decays,
+            &latest_obstacles,
+            ground_to_field,
+        );
+
         if let Some(ground_to_field) = ground_to_field {
             heatmap.clear_obstacle_occupied_cells(
                 field_dimensions,
@@ -252,6 +270,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             );
         }
 
+        heatmap.apply_convolution(parameters.heatmap_convolution_kernel_weight)?;
         heatmap.update_selected_target(
             parameters.minimum_validity,
             parameters.tile_switch_hysteresis,
@@ -293,6 +312,77 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             .await?;
 
         tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+fn update_active_teammate_fov_decay(
+    network_message: &TimeWrapper<IncomingMessage>,
+    own_player_number: Option<PlayerNumber>,
+    received_at: Instant,
+    active_teammate_fov_decays: &mut HashMap<PlayerNumber, TeammateFovDecay>,
+) {
+    let IncomingMessage::Hsl(HulkMessage::State(StateMessage {
+        player_number,
+        pose,
+        head_yaw,
+        ball_position,
+    })) = &network_message.inner
+    else {
+        return;
+    };
+
+    if Some(*player_number) == own_player_number || ball_position.is_some() {
+        active_teammate_fov_decays.remove(player_number);
+    } else {
+        active_teammate_fov_decays.insert(
+            *player_number,
+            TeammateFovDecay {
+                pose: *pose,
+                head_yaw: *head_yaw,
+                received_at,
+            },
+        );
+    }
+}
+
+fn decay_active_teammate_fovs(
+    heatmap: &mut Heatmap,
+    field_dimensions: FieldDimensions,
+    now: Instant,
+    parameters: &SearchSuggestorParameters,
+    active_teammate_fov_decays: &mut HashMap<PlayerNumber, TeammateFovDecay>,
+    obstacles: &[Obstacle],
+    ground_to_field: Option<Isometry2<Ground, Field>>,
+) {
+    active_teammate_fov_decays.retain(|_, decay| {
+        now.checked_duration_since(decay.received_at)
+            .is_some_and(|age| age < parameters.teammate_fov_decay_duration)
+    });
+
+    for decay in active_teammate_fov_decays.values() {
+        if let Some(ground_to_field) = ground_to_field {
+            heatmap.decay_tiles_in_robot_fov_with_obstacles(
+                field_dimensions,
+                decay.pose.position().coords(),
+                decay.pose.angle() + decay.head_yaw,
+                parameters.decay_distance_factor,
+                parameters.heatmap_decay_range.clone(),
+                parameters.heatmap_full_decay_distance,
+                parameters.heatmap_decay_falloff_distance,
+                obstacles,
+                ground_to_field,
+            );
+        } else {
+            heatmap.decay_tiles_in_robot_fov(
+                field_dimensions,
+                decay.pose.position().coords(),
+                decay.pose.angle() + decay.head_yaw,
+                parameters.decay_distance_factor,
+                parameters.heatmap_decay_range.clone(),
+                parameters.heatmap_full_decay_distance,
+                parameters.heatmap_decay_falloff_distance,
+            );
+        }
     }
 }
 
@@ -368,6 +458,107 @@ fn collect_voronoi_sites(
 mod tests {
     use super::*;
     use linear_algebra::point;
+
+    #[test]
+    fn teammate_fov_decay_expires_after_parameter_duration() {
+        let field_dimensions = FieldDimensions {
+            length: 20.0,
+            width: 1.0,
+            ..Default::default()
+        };
+        let parameters = SearchSuggestorParameters {
+            cells_per_meter: 1.0,
+            teammate_fov_decay_duration: Duration::from_secs(1),
+            decay_distance_factor: 0.5,
+            heatmap_decay_range: 0.0..10.0,
+            ..Default::default()
+        };
+        let start = Instant::now();
+        let mut active_decays = HashMap::new();
+        let no_ball_message = TimeWrapper {
+            time: ros_z::time::Time::zero(),
+            inner: IncomingMessage::Hsl(HulkMessage::State(StateMessage {
+                player_number: PlayerNumber::Two,
+                pose: Pose2::new(point![0.0, 0.0], 0.0),
+                head_yaw: 0.0,
+                ball_position: None,
+            })),
+        };
+        update_active_teammate_fov_decay(
+            &no_ball_message,
+            Some(PlayerNumber::One),
+            start,
+            &mut active_decays,
+        );
+
+        let mut heatmap = Heatmap::new_uniform(field_dimensions, parameters.cells_per_meter);
+        decay_active_teammate_fovs(
+            &mut heatmap,
+            field_dimensions,
+            start + Duration::from_millis(999),
+            &parameters,
+            &mut active_decays,
+            &[],
+            None,
+        );
+        let visible_tile = (11, 0);
+        assert!(heatmap.value_at(visible_tile) < 1.0);
+
+        let mut heatmap = Heatmap::new_uniform(field_dimensions, parameters.cells_per_meter);
+        decay_active_teammate_fovs(
+            &mut heatmap,
+            field_dimensions,
+            start + Duration::from_secs(1),
+            &parameters,
+            &mut active_decays,
+            &[],
+            None,
+        );
+        assert_eq!(heatmap.value_at(visible_tile), 1.0);
+        assert!(active_decays.is_empty());
+    }
+
+    #[test]
+    fn new_teammate_message_stops_previous_fov_decay() {
+        let start = Instant::now();
+        let mut active_decays = HashMap::new();
+        let no_ball_message = TimeWrapper {
+            time: ros_z::time::Time::zero(),
+            inner: IncomingMessage::Hsl(HulkMessage::State(StateMessage {
+                player_number: PlayerNumber::Two,
+                pose: Pose2::new(point![0.0, 0.0], 0.0),
+                head_yaw: 0.0,
+                ball_position: None,
+            })),
+        };
+        let ball_message = TimeWrapper {
+            time: ros_z::time::Time::zero(),
+            inner: IncomingMessage::Hsl(HulkMessage::State(StateMessage {
+                player_number: PlayerNumber::Two,
+                pose: Pose2::new(point![0.0, 0.0], 0.0),
+                head_yaw: 0.0,
+                ball_position: Some(hsl_network_messages::BallPosition {
+                    position: point![1.0, 0.0],
+                    age: Duration::ZERO,
+                }),
+            })),
+        };
+
+        update_active_teammate_fov_decay(
+            &no_ball_message,
+            Some(PlayerNumber::One),
+            start,
+            &mut active_decays,
+        );
+        update_active_teammate_fov_decay(
+            &ball_message,
+            Some(PlayerNumber::One),
+            start + Duration::from_millis(10),
+            &mut active_decays,
+        );
+
+        assert!(active_decays.is_empty());
+    }
 
     #[test]
     fn collect_voronoi_sites_excludes_goalkeeper_teammate() {
