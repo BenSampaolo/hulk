@@ -1,9 +1,4 @@
-use std::{
-    future::Future,
-    pin::Pin,
-    sync::Arc,
-    time::{Duration, Instant},
-};
+use std::{future::Future, pin::Pin, sync::Arc, time::Duration};
 
 use booster::{JointsMotorState, LowState};
 use color_eyre::{Report, Result};
@@ -12,12 +7,18 @@ use nalgebra::UnitQuaternion;
 use ros_z::{
     Message,
     prelude::*,
+    pubsub::Received,
     qos::{QosDurability, QosHistory, QosReliability},
+    service::RequestId,
     time::Time,
 };
 use serde::{Deserialize, Serialize};
-use types::joint_limits::JointLimits;
-use types::motor_command::MotorCommand;
+use tracing::warn;
+use types::{
+    joint_limits::JointLimits,
+    motor_command::MotorCommand,
+    walking_velocity_limits::{WALKING_VELOCITY_LIMITS_TOPIC, WalkingVelocityLimits},
+};
 
 pub use crate::config::Parameters;
 use crate::{
@@ -30,11 +31,37 @@ pub const GETUP_INFERENCE_SERVICE: &str = "motion_inference/infer_getup";
 pub const KICK_INFERENCE_SERVICE: &str = "motion_inference/infer_kick";
 pub const WALK_INFERENCE_SERVICE: &str = "motion_inference/infer_walk";
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, Message)]
+pub struct InferenceRequest<T> {
+    pub command: T,
+    pub reset: bool,
+    /// Node-time deadline; caller and server must share the same clock domain.
+    pub deadline: Time,
+}
+
+impl<T> InferenceRequest<T> {
+    pub fn new(command: T, reset: bool, now: Time, timeout: Duration) -> Self {
+        Self {
+            command,
+            reset,
+            deadline: now + timeout,
+        }
+    }
+
+    pub(crate) fn map<U>(self, map: impl FnOnce(T) -> U) -> InferenceRequest<U> {
+        InferenceRequest {
+            command: map(self.command),
+            reset: self.reset,
+            deadline: self.deadline,
+        }
+    }
+}
+
 macro_rules! inference_service {
     ($name:ident, $command:ty, $joints:ty) => {
         pub struct $name;
         impl Service for $name {
-            type Request = $command;
+            type Request = InferenceRequest<$command>;
             type Response = InferenceResult<$joints>;
         }
         impl ServiceTypeInfo for $name {
@@ -66,7 +93,7 @@ inference_service!(
 );
 inference_service!(GetUpInferenceService, GetUpCommand, Joints<MotorCommand>);
 
-use crate::services::{InferenceReply, Requests};
+use crate::services::{Pending, Requests};
 pub const STATUS_TOPIC: &str = "motion_inference/status";
 pub const TIMING_TOPIC: &str = "motion_inference/timing";
 
@@ -74,12 +101,12 @@ pub type InferenceResult<T> = std::result::Result<T, InferenceError>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, Message, thiserror::Error)]
 pub enum InferenceError {
-    #[error("inference request or selected sensor frame expired")]
-    Expired,
-    #[error("inference request was superseded")]
-    Superseded,
-    #[error("inference is waiting for fresh sensors and validated joint limits")]
+    #[error("inference is waiting for sensors and validated joint limits")]
     Unavailable,
+    #[error("inference request deadline expired")]
+    DeadlineExpired,
+    #[error("inference input {input}: {reason}")]
+    InputUnavailable { input: String, reason: String },
     #[error("motion inference fault: {source:#}")]
     Fault {
         #[serde(with = "ros_z::message::report")]
@@ -101,25 +128,16 @@ pub enum State {
 
 #[derive(Clone, Serialize, Deserialize, Message)]
 pub struct Timing {
+    pub request_id: RequestId,
     pub policy: Policy,
     pub received_at: Time,
     pub started_at: Time,
     pub completed_at: Time,
     pub sensor_time: Time,
+    /// Elapsed node time, which may be zero while simulation is paused.
     pub compute_duration: Duration,
     pub accepted: bool,
     pub error: Option<String>,
-}
-
-struct Pending {
-    request: InferenceCommand,
-    reply: InferenceReply,
-    received_at: Time,
-}
-impl Pending {
-    async fn reject(self, error: InferenceError) {
-        self.reply.respond(Err(error)).await;
-    }
 }
 
 pub fn run_boxed(ctx: Arc<Context>) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
@@ -197,6 +215,14 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         })
         .build()
         .await?;
+    let walking_velocity_limits = node
+        .subscriber::<WalkingVelocityLimits>(WALKING_VELOCITY_LIMITS_TOPIC)
+        .qos(QosProfile {
+            durability: QosDurability::TransientLocal,
+            ..qos
+        })
+        .build()
+        .await?;
     let mut requests = Requests::new(&node, qos).await?;
     statuses
         .publish(&Status {
@@ -204,33 +230,108 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             state: State::Initialized,
         })
         .await?;
-    Runtime::new(
-        parameters.snapshot().typed.clone(),
-        node.clock().clone(),
-        controller,
-    )
-    .run(sensors, limits, &mut requests, &statuses, &timings)
-    .await
+    let snapshot = parameters.snapshot();
+    let runtime = Runtime::new(snapshot.typed.clone(), node.clock().clone(), controller);
+    runtime
+        .run(
+            sensors,
+            limits,
+            walking_velocity_limits,
+            &mut requests,
+            &statuses,
+            &timings,
+        )
+        .await
+}
+
+#[derive(Clone)]
+struct PublicationOrigin {
+    topic: String,
+    publication_id: String,
+    source_time: Time,
+    received_at: Time,
+}
+
+impl PublicationOrigin {
+    fn from_received<T>(topic: &str, value: &Received<T>, received_at: Time) -> Self {
+        Self {
+            topic: topic.into(),
+            publication_id: value.publication_id().to_string(),
+            source_time: value.source_time,
+            received_at,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct SensorLifetime {
+    origin: PublicationOrigin,
+    maximum_age: Duration,
+}
+
+impl SensorLifetime {
+    fn new(origin: PublicationOrigin, maximum_age: Duration) -> Self {
+        Self {
+            origin,
+            maximum_age,
+        }
+    }
+
+    fn deadline(&self) -> Time {
+        self.origin.source_time + self.maximum_age
+    }
+
+    fn check(&self, now: Time) -> InferenceResult<()> {
+        if self.origin.source_time > self.origin.received_at || self.origin.source_time > now {
+            return Err(InferenceError::InputUnavailable {
+                input: self.origin.topic.clone(),
+                reason: format!(
+                    "{} has a future source timestamp",
+                    self.origin.publication_id
+                ),
+            });
+        }
+        if now >= self.deadline() {
+            let age = now.duration_since(self.origin.source_time);
+            return Err(InferenceError::InputUnavailable {
+                input: self.origin.topic.clone(),
+                reason: format!(
+                    "{} expired: age {age:?}, limit {:?}",
+                    self.origin.publication_id, self.maximum_age
+                ),
+            });
+        }
+        Ok(())
+    }
 }
 
 type WorkerResult = (
     Inference,
-    Result<Box<Joints<MotorCommand>>>,
+    InferenceResult<Box<Joints<MotorCommand>>>,
     Policy,
     Duration,
 );
+
+struct ActiveRequest {
+    pending: Pending,
+    started_at: Time,
+    sensor: SensorLifetime,
+    policy_deadline: Option<Time>,
+}
 
 struct Runtime {
     parameters: Arc<Parameters>,
     clock: ros_z::time::Clock,
     controller: Option<Inference>,
     worker: Option<tokio::task::JoinHandle<WorkerResult>>,
-    active: Option<(Pending, Time, Time)>,
-    pending: Option<Pending>,
+    active: Option<ActiveRequest>,
     sensor: Option<SensorFrame>,
+    sensor_lifetime: Option<SensorLifetime>,
     joint_limits: Option<Arc<JointLimits>>,
+    walking_velocity_limits: Option<WalkingVelocityLimits>,
     velocity: VelocityEstimator,
     last_position: Option<(Policy, Joints<f32>)>,
+    policy_deadline: Option<Time>,
     fault: Option<Arc<Report>>,
 }
 
@@ -246,11 +347,13 @@ impl Runtime {
             controller,
             worker: None,
             active: None,
-            pending: None,
             sensor: None,
+            sensor_lifetime: None,
             joint_limits: None,
+            walking_velocity_limits: None,
             velocity: VelocityEstimator::default(),
             last_position: None,
+            policy_deadline: None,
             fault: None,
         }
     }
@@ -259,36 +362,63 @@ impl Runtime {
         mut self,
         sensors: Subscriber<LowState>,
         limits: Subscriber<JointLimits>,
+        walking_velocity_limits: Subscriber<WalkingVelocityLimits>,
         requests: &mut Requests,
         statuses: &Publisher<Status>,
         timings: &Publisher<Timing>,
     ) -> Result<()> {
         let mut published_fault: Option<String> = None;
         loop {
+            self.expire_inputs(self.clock.now());
+            let expiry = self.next_expiry();
             tokio::select! {
+                _ = async {
+                    match expiry {
+                        Some(deadline) => self.clock.sleep_until(deadline).await,
+                        None => std::future::pending().await,
+                    }
+                } => {}
                 received = sensors.recv_with_metadata() => {
-                    let received = received?;
-                    self.receive_sensor(&received, received.source_time);
+                    match received {
+                        Ok(received) => self.receive_sensor(received),
+                        Err(error @ ros_z::Error::Wire(_)) => {
+                            self.sensor = None;
+                            self.set_fault(error.into());
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
-                received = limits.recv() => {
-                    self.receive_limits(received?);
+                received = limits.recv_with_metadata() => {
+                    match received {
+                        Ok(received) => self.receive_limits(received),
+                        Err(error @ ros_z::Error::Wire(_)) => {
+                            self.joint_limits = None;
+                            self.set_fault(error.into());
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
                 }
-                received = requests.receive() => {
-                    let (request, reply) = received?;
-                    self.enqueue(Pending {
-                        request,
-                        reply,
-                        received_at: self.clock.now(),
-                    })
-                    .await;
+                received = walking_velocity_limits.recv() => {
+                    match received {
+                        Ok(limits) => self.receive_walking_velocity_limits(limits),
+                        Err(error @ ros_z::Error::Wire(_)) => {
+                            self.walking_velocity_limits = None;
+                            self.set_fault(error.into());
+                        }
+                        Err(error) => return Err(error.into()),
+                    }
+                }
+                pending = requests.receive(), if self.worker.is_none() => {
+                    if let Some(pending) = pending {
+                        self.expire_inputs(self.clock.now());
+                        self.dispatch(pending).await;
+                    }
                 }
                 completed = async { self.worker.as_mut().expect("active worker").await }, if self.worker.is_some() => {
-                    self.complete(completed?, timings).await?;
-                }
-                _ = std::future::ready(()), if self.worker.is_none() && self.pending.is_some() => {
-                    self.dispatch().await;
+                    self.complete(completed?, timings).await;
                 }
             }
+            self.expire_inputs(self.clock.now());
             let fault = self.fault.as_ref().map(|error| format!("{error:#}"));
 
             if fault != published_fault {
@@ -311,60 +441,143 @@ impl Runtime {
         }
     }
 
-    fn receive_sensor(&mut self, low: &LowState, time: Time) {
-        let sensor = match sensor_frame(low, time) {
+    fn receive_sensor(&mut self, received: Received<LowState>) {
+        let now = self.clock.now();
+        self.expire_inputs(now);
+        let origin = PublicationOrigin::from_received("inputs/low_state", &received, now);
+        let sensor = match sensor_frame(&received, received.source_time) {
             Ok(sensor) => sensor,
             Err(error) => {
                 self.sensor = None;
-                self.fault = Some(Arc::new(error));
+                self.set_fault(error);
                 return;
             }
         };
         if let Err(error) = sensor.validate(&self.parameters) {
             self.sensor = None;
-            self.fault = Some(Arc::new(error));
+            self.set_fault(error);
             return;
         }
-        let now = self.clock.now();
-        if sensor.timestamp > now {
-            self.sensor = None;
-            self.fault = Some(Arc::new(Report::msg("sensor timestamp is in the future")));
-            return;
+        // Freshness gates policy execution, never the estimator's sensor stream.
+        if self.velocity.update(&sensor, &self.parameters) {
+            self.sensor_lifetime = Some(SensorLifetime::new(
+                origin,
+                self.parameters.timing.sensor_timeout,
+            ));
+            self.sensor = Some(sensor);
+            self.expire_inputs(now);
+            self.recover_inputs();
         }
-        if now.duration_since(sensor.timestamp) > self.parameters.timing.maximum_sensor_age
-            || self
-                .sensor
-                .as_ref()
-                .is_some_and(|old| sensor.timestamp <= old.timestamp)
-        {
-            return;
-        }
-        if let Err(error) = self.velocity.update(&sensor, &self.parameters) {
-            self.fault = Some(Arc::new(error));
-        }
-        self.sensor = Some(sensor);
     }
 
-    fn receive_limits(&mut self, limits: JointLimits) {
+    fn receive_limits(&mut self, limits: Received<JointLimits>) {
         match limits.validate() {
-            Ok(()) => self.joint_limits = Some(Arc::new(limits)),
+            Ok(()) => self.joint_limits = Some(Arc::new(limits.message)),
             Err(reason) => {
                 self.joint_limits = None;
-                self.fault = Some(Arc::new(Report::msg(reason)));
+                self.set_fault(Report::msg(reason));
             }
         }
+        self.recover_inputs();
     }
 
-    async fn enqueue(&mut self, pending: Pending) {
-        self.fault = None;
-        if let Some(old) = self.pending.replace(pending) {
-            old.reject(InferenceError::Superseded).await;
+    fn receive_walking_velocity_limits(&mut self, limits: WalkingVelocityLimits) {
+        match limits.validate() {
+            Ok(()) => self.walking_velocity_limits = Some(limits),
+            Err(reason) => {
+                self.walking_velocity_limits = None;
+                self.set_fault(Report::msg(reason));
+            }
+        }
+        self.recover_inputs();
+    }
+
+    fn set_fault(&mut self, error: Report) {
+        self.fault = Some(Arc::new(error));
+        self.reset_execution();
+    }
+
+    fn recover_inputs(&mut self) {
+        // Keep any fault latched until the worker that observed it has completed.
+        if self.worker.is_none()
+            && self.sensor.is_some()
+            && self.joint_limits.is_some()
+            && self.walking_velocity_limits.is_some()
+        {
+            self.fault = None;
         }
     }
 
-    async fn dispatch(&mut self) {
-        let pending = self.pending.take().expect("pending request");
+    fn reset_execution(&mut self) {
+        if let Some(controller) = &mut self.controller {
+            controller.reset();
+        }
+        self.last_position = None;
+        self.policy_deadline = None;
+    }
+
+    fn next_expiry(&self) -> Option<Time> {
+        let sensor_deadline = self
+            .sensor
+            .as_ref()
+            .and(self.sensor_lifetime.as_ref())
+            .map(SensorLifetime::deadline);
+        sensor_deadline
+            .into_iter()
+            .chain(self.policy_deadline)
+            .min()
+    }
+
+    fn expire_inputs(&mut self, now: Time) {
+        let sensor_expired = self.sensor.is_some()
+            && self
+                .sensor_lifetime
+                .as_ref()
+                .is_some_and(|input| input.check(now).is_err());
+        if sensor_expired {
+            self.sensor = None;
+        }
+        if sensor_expired || self.policy_deadline.is_some_and(|deadline| now >= deadline) {
+            self.reset_execution();
+        }
+    }
+
+    fn check_inputs(&self, now: Time) -> InferenceResult<()> {
+        if let Some(input) = &self.sensor_lifetime {
+            input.check(now)?;
+        }
+        if self.sensor.is_none() {
+            return Err(InferenceError::InputUnavailable {
+                input: "inputs/low_state".into(),
+                reason: "missing".into(),
+            });
+        }
+        if self.joint_limits.is_none() {
+            return Err(InferenceError::InputUnavailable {
+                input: "joint_limits".into(),
+                reason: "missing".into(),
+            });
+        }
+        if self.walking_velocity_limits.is_none() {
+            return Err(InferenceError::InputUnavailable {
+                input: WALKING_VELOCITY_LIMITS_TOPIC.into(),
+                reason: "missing".into(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn dispatch(&mut self, pending: Pending) {
         let now = self.clock.now();
+        self.expire_inputs(now);
+        if pending.expired(now) {
+            pending.reject(InferenceError::DeadlineExpired).await;
+            return;
+        }
+        self.recover_inputs();
+        if pending.request.reset {
+            self.reset_execution();
+        }
         if let Some(source) = &self.fault {
             pending
                 .reject(InferenceError::Fault {
@@ -373,74 +586,143 @@ impl Runtime {
                 .await;
             return;
         }
-        let (Some(sensor), Some(limits)) = (&self.sensor, &self.joint_limits) else {
-            pending.reject(InferenceError::Unavailable).await;
-            return;
-        };
-        if sensor.validate_at(now, &self.parameters).is_err() {
-            pending.reject(InferenceError::Expired).await;
+        if let Err(error) = self.check_inputs(self.clock.now()) {
+            pending.reject(error).await;
             return;
         }
-        let mut sensor = sensor.clone();
-        sensor.last_commanded_position = match self.last_position {
+        let mut sensor = self.sensor.clone().expect("validated sensor");
+        let limits = self.joint_limits.as_ref().expect("validated limits");
+        let sensor_lifetime = self
+            .sensor_lifetime
+            .clone()
+            .expect("validated sensor origin");
+        let request = pending.request.command;
+        let last_commanded_position = match self.last_position {
             Some((policy, _))
-                if policy.is_locomotion()
-                    && matches!(pending.request, InferenceCommand::GetUp(_)) =>
+                if policy.is_locomotion() && matches!(request, InferenceCommand::GetUp(_)) =>
             {
                 sensor.position
             }
             Some((_, position)) => position,
             None => sensor.position,
         };
+        sensor.last_commanded_position = last_commanded_position;
         let limits = limits.clone();
+        let walking_velocity_limits = self
+            .walking_velocity_limits
+            .expect("validated walking velocity limits");
         let velocity = self.velocity.clone();
-        let request = pending.request;
         let mut controller = self.controller.take().expect("idle controller");
         let clock = self.clock.clone();
         let parameters = self.parameters.clone();
-        self.active = Some((pending, now, sensor.timestamp));
+        let expires_at = pending.request.deadline;
+        self.active = Some(ActiveRequest {
+            pending,
+            started_at: now,
+            sensor: sensor_lifetime.clone(),
+            policy_deadline: self.policy_deadline,
+        });
         self.worker = Some(tokio::task::spawn_blocking(move || {
-            let start = Instant::now();
-            let result = controller.execute_request(
-                clock.now(),
-                &sensor,
-                request,
-                velocity,
-                &limits,
-                parameters,
-            );
-            (controller, result, request.policy(), start.elapsed())
+            let start = clock.now();
+            let result = if start >= expires_at {
+                Err(InferenceError::DeadlineExpired)
+            } else {
+                sensor_lifetime.check(start).and_then(|()| {
+                    controller.update_parameters(parameters);
+                    controller
+                        .execute_request(
+                            start,
+                            &sensor,
+                            request,
+                            velocity,
+                            &limits,
+                            walking_velocity_limits,
+                        )
+                        .map_err(|error| InferenceError::Fault {
+                            source: Arc::new(error),
+                        })
+                })
+            };
+            (
+                controller,
+                result,
+                request.policy(),
+                clock.now().duration_since(start),
+            )
         }));
     }
 
-    async fn complete(
-        &mut self,
-        completed: WorkerResult,
-        timings: &Publisher<Timing>,
-    ) -> Result<()> {
+    async fn complete(&mut self, completed: WorkerResult, timings: &Publisher<Timing>) {
         self.worker = None;
-        let (pending, started_at, sensor_time) = self.active.take().expect("active request");
-        let (mut controller, result, policy, compute_duration) = completed;
+        self.expire_inputs(self.clock.now());
+        let active = self.active.take().expect("active request");
+        let (controller, result, policy, compute_duration) = completed;
         let now = self.clock.now();
-        let valid = now >= sensor_time
-            && now.duration_since(sensor_time) <= self.parameters.timing.maximum_sensor_age;
-        let result = if let Some(source) = &self.fault {
-            controller.reset();
-            self.last_position = None;
+        let result = self.accept_result(controller, result, policy, &active);
+        let ActiveRequest {
+            pending,
+            started_at,
+            sensor,
+            ..
+        } = active;
+        let timing = Timing {
+            request_id: pending.reply.id().clone(),
+            policy: pending.request.command.policy(),
+            received_at: pending.received_at,
+            started_at,
+            completed_at: now,
+            sensor_time: sensor.origin.source_time,
+            compute_duration,
+            accepted: result.is_ok(),
+            error: result.as_ref().err().map(ToString::to_string),
+        };
+        let expires_at = pending.request.deadline;
+        let reply_sent = pending.reply.respond(result).await;
+        if !reply_sent || self.clock.now() >= expires_at {
+            self.reset_execution();
+        }
+        if let Err(error) = timings.publish_if_subscribed(|| async { timing }).await {
+            warn!(%error, "failed to publish inference timing");
+        }
+    }
+
+    fn accept_result(
+        &mut self,
+        mut controller: Inference,
+        result: InferenceResult<Box<Joints<MotorCommand>>>,
+        policy: Policy,
+        active: &ActiveRequest,
+    ) -> InferenceResult<Box<Joints<MotorCommand>>> {
+        let now = self.clock.now();
+        let result = if active.pending.expired(now) {
+            Err(InferenceError::DeadlineExpired)
+        } else if let Some(source) = &self.fault {
             Err(InferenceError::Fault {
                 source: source.clone(),
             })
-        } else if !valid {
-            controller.reset();
-            self.last_position = None;
-            Err(InferenceError::Expired)
-        } else {
-            result.map_err(|error| {
-                let source = Arc::new(error);
-                self.fault = Some(source.clone());
-                InferenceError::Fault { source }
+        } else if let Err(error) = active.sensor.check(now) {
+            Err(error)
+        } else if active
+            .policy_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            Err(InferenceError::InputUnavailable {
+                input: "policy_state".into(),
+                reason: format!(
+                    "expired after {:?} without a successful update",
+                    self.parameters.timing.policy_state_max_age
+                ),
             })
+        } else {
+            result
         };
+        if let Err(InferenceError::Fault { source }) = &result {
+            self.fault = Some(source.clone());
+        }
+        if result.is_err() {
+            controller.reset();
+            self.reset_execution();
+        }
         if let Ok(output) = &result {
             self.last_position = Some((
                 policy,
@@ -450,22 +732,10 @@ impl Runtime {
                     .map(|joint| joint.position)
                     .collect(),
             ));
+            self.policy_deadline = Some(now + self.parameters.timing.policy_state_max_age);
         }
         self.controller = Some(controller);
-        timings
-            .publish(&Timing {
-                policy: pending.request.policy(),
-                received_at: pending.received_at,
-                started_at,
-                completed_at: now,
-                sensor_time,
-                compute_duration,
-                accepted: result.is_ok(),
-                error: result.as_ref().err().map(ToString::to_string),
-            })
-            .await?;
-        pending.reply.respond(result).await;
-        Ok(())
+        result
     }
 }
 
@@ -481,31 +751,4 @@ fn sensor_frame(low_state: &LowState, timestamp: Time) -> Result<SensorFrame> {
         gyro: low_state.imu_state.angular_velocity,
         last_commanded_position: motors.positions(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sensor_frame_seeds_previous_targets_from_measured_positions() {
-        let positions: Joints<f32> = (0..crate::config::JOINT_COUNT)
-            .map(|index| index as f32 * 0.01)
-            .collect();
-        let low_state = LowState {
-            motor_state_serial: positions
-                .into_iter()
-                .map(|position| booster::MotorState {
-                    position,
-                    ..Default::default()
-                })
-                .collect(),
-            ..Default::default()
-        };
-
-        let sensor = sensor_frame(&low_state, Time::zero()).unwrap();
-
-        assert_eq!(sensor.position, positions);
-        assert_eq!(sensor.last_commanded_position, positions);
-    }
 }

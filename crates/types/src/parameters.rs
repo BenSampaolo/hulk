@@ -39,7 +39,6 @@ pub struct BehaviorParameters {
     pub ball: BallBehaviorParameters,
     pub walking: WalkingBehaviorParameters,
     pub kicking: KickingParameters,
-    pub stand_up: StandUpParameters,
     pub goalkeeper: GoalkeeperParameters,
     pub search: SearchParameters,
     pub substates: SubstatesParameters,
@@ -375,11 +374,6 @@ impl Default for KickingParameters {
             minimum_interception_forward_distance: 0.0,
         }
     }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize, ros_z::Message)]
-pub struct StandUpParameters {
-    pub fast: bool,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, ros_z::Message)]
