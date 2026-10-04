@@ -4,8 +4,8 @@
   timing: {
     policy_period: { secs: 0, nanos: 20000000 },
     sensor_period: { secs: 0, nanos: 2000000 },
-    sensor_timeout: { secs: 0, nanos: 40000000 },
-    policy_state_max_age: { secs: 0, nanos: 200000000 },
+    sensor_timeout: { secs: 0, nanos: 300000000 },
+    policy_state_max_age: { secs: 1, nanos: 0 },
   },
   // Velocity limiter delta is degrees/second per sensor update; scales encode network features.
   observation: {
