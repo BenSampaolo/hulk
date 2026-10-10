@@ -37,6 +37,13 @@ pub fn create_tree() -> Node<Blackboard> {
             action!(damping)
         ),
         sequence!(
+            condition!(is_primary_state, PrimaryState::ManualStandUp),
+            selection!(
+                sequence!(condition!(is_falling), action!(damping)),
+                action!(stand_up)
+            )
+        ),
+        sequence!(
             condition!(is_primary_state, PrimaryState::Prepare),
             switch_motion_type(
                 MotionType::Prepare,

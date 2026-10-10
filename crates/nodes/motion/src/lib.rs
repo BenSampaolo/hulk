@@ -177,6 +177,7 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         get_up_inference_client,
         motion_emergency_stop_pub,
         reset_inference: true,
+        get_up_failed: false,
 
         // TODO probably bad defaults
         last_joints_command: Joints::fill(MotorCommand::damping()),
@@ -229,11 +230,10 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             walking_velocity_limits,
         );
 
-        cycles_since_last_inference += 1;
-        let do_inference = cycles_since_last_inference >= 10;
-        if do_inference {
-            cycles_since_last_inference = 0;
-        }
+        let do_inference = motion_plan.should_run_inference(
+            &mut cycles_since_last_inference,
+            motion_state.reset_inference,
+        );
 
         let joint_state = serial_motor_states_sub
             .get_latest()
@@ -274,7 +274,25 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
             };
         }
 
+        robot_command = prioritize_damping(
+            motion_command_cache.get_latest().as_deref(),
+            robot_command,
+            &mut motion_state.reset_inference,
+        );
         robot_command_pub.publish(&robot_command).await?;
+    }
+}
+
+fn prioritize_damping(
+    latest_motion_command: Option<&MotionCommand>,
+    robot_command: RobotCommand,
+    reset_inference: &mut bool,
+) -> RobotCommand {
+    if matches!(latest_motion_command, Some(MotionCommand::Damping)) {
+        *reset_inference = true;
+        RobotCommand::Damping
+    } else {
+        robot_command
     }
 }
 
@@ -285,6 +303,7 @@ struct MotionState {
     get_up_inference_client: ServiceClient<GetUpInferenceService>,
     motion_emergency_stop_pub: Publisher<()>,
     reset_inference: bool,
+    get_up_failed: bool,
     last_joints_command: Joints<MotorCommand>,
     last_timestamp: Time,
 }
@@ -306,6 +325,25 @@ enum MotionPlan {
 }
 
 impl MotionPlan {
+    fn blocks_failed_get_up(&self, get_up_failed: &mut bool) -> bool {
+        *get_up_failed &= matches!(self, Self::GetUp { .. });
+        *get_up_failed
+    }
+
+    fn should_run_inference(
+        &self,
+        cycles_since_last_inference: &mut u8,
+        reset_inference: bool,
+    ) -> bool {
+        *cycles_since_last_inference += 1;
+        let do_inference = *cycles_since_last_inference >= 10
+            || (reset_inference && matches!(self, Self::GetUp { .. }));
+        if do_inference {
+            *cycles_since_last_inference = 0;
+        }
+        do_inference
+    }
+
     fn from_motion_command(
         motion_command: &MotionCommand,
         parameters: &WalkingParameters,
@@ -411,10 +449,13 @@ impl MotionState {
         do_inference: bool,
     ) -> Result<RobotCommand> {
         let now = clock.now();
+        let is_get_up = matches!(motion_plan, MotionPlan::GetUp { .. });
+        let block_get_up = motion_plan.blocks_failed_get_up(&mut self.get_up_failed);
 
         let robot_command = match motion_plan {
             MotionPlan::Damping => RobotCommand::Damping,
             MotionPlan::Prepare => RobotCommand::Prepare,
+            MotionPlan::GetUp { .. } if block_get_up => RobotCommand::Damping,
             MotionPlan::GetUp { command } => {
                 self.infer_get_up(command, clock, parameters, do_inference)
                     .await?
@@ -472,6 +513,9 @@ impl MotionState {
             }
         };
 
+        if is_get_up && matches!(robot_command, RobotCommand::Damping) {
+            self.get_up_failed = true;
+        }
         if !matches!(robot_command, RobotCommand::Custom { .. }) {
             self.reset_inference = true;
         } else if do_inference {
@@ -616,6 +660,8 @@ impl MotionState {
                 error!(
                     "Failed to call GetUp inference service, sending RobotCommand::Damping! {ros_z_error}"
                 );
+
+                self.send_emergency_stop_signal().await?;
 
                 RobotCommand::Damping
             }
