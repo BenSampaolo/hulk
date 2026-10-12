@@ -58,6 +58,14 @@ impl Network {
     }
 
     pub fn run(&mut self, observation: &[f32]) -> Result<Vec<f32>> {
+        self.run_with_output_observer(observation, |_, _| {})
+    }
+
+    pub(crate) fn run_with_output_observer(
+        &mut self,
+        observation: &[f32],
+        on_output: impl FnOnce(&[i64], &[f32]),
+    ) -> Result<Vec<f32>> {
         let (input_size, output_size) = self.policy.dimensions();
         ensure!(
             observation.len() == input_size,
@@ -72,6 +80,7 @@ impl Network {
         let input = TensorRef::from_array_view(([1usize, input_size], observation))?;
         let outputs = self.session.run(ort::inputs![input])?;
         let (shape, values) = outputs[0].try_extract_tensor::<f32>()?;
+        on_output(shape.as_ref(), values);
         ensure!(
             shape.as_ref() == [1, output_size as i64] && values.len() == output_size,
             "unexpected output shape"

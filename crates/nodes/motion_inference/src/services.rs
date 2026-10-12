@@ -5,6 +5,7 @@ use crate::{
         InferenceResult, KICK_INFERENCE_SERVICE, KickInferenceService, WALK_INFERENCE_SERVICE,
         WalkInferenceService,
     },
+    trace::{Event, Trace},
 };
 use kinematics::joints::{
     Joints,
@@ -23,6 +24,7 @@ pub(super) struct Pending {
     pub request: InferenceRequest<InferenceCommand>,
     pub reply: InferenceReply,
     pub received_at: Time,
+    pub trace: Trace,
 }
 
 impl Pending {
@@ -31,6 +33,9 @@ impl Pending {
     }
 
     pub(super) async fn reject(self, error: InferenceError) {
+        self.trace.record(Event::Outcome {
+            error: Some(error.clone()),
+        });
         self.reply.respond(Err(error)).await;
     }
 }
@@ -40,10 +45,11 @@ pub(super) struct Requests {
     kick: ServiceServer<KickInferenceService>,
     get_up: ServiceServer<GetUpInferenceService>,
     clock: Clock,
+    trace: Trace,
 }
 
 impl Requests {
-    pub async fn new(node: &Node, qos: QosProfile) -> ros_z::Result<Self> {
+    pub async fn new(node: &Node, qos: QosProfile, trace: Trace) -> ros_z::Result<Self> {
         let qos = QosProfile {
             history: QosHistory::from_depth(2),
             ..qos
@@ -65,6 +71,7 @@ impl Requests {
                 .build()
                 .await?,
             clock: node.clock().clone(),
+            trace,
         })
     }
 
@@ -98,13 +105,23 @@ impl Requests {
             Ok(received) => received,
             Err(error) => {
                 warn!(service, %error, "discarding malformed inference request");
+                self.trace.record_at(
+                    received_at,
+                    Event::DecodeError {
+                        service: service.to_owned(),
+                        error: error.to_string(),
+                    },
+                );
                 return None;
             }
         };
+        let trace = self.trace.for_request(reply.id().clone());
+        trace.record_at(received_at, Event::Request(request.command));
         Some(Pending {
             request,
             reply,
             received_at,
+            trace,
         })
     }
 }

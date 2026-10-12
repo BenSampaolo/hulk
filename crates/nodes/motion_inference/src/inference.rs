@@ -18,6 +18,7 @@ use crate::{
     locomotion::{KickRequest, Locomotion, kick, walk},
     network::Network,
     observation::{SensorFrame, VelocityEstimator},
+    trace::{Event, Trace},
 };
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, ros_z::Message)]
@@ -45,7 +46,7 @@ impl WalkCommand {
 #[serde(deny_unknown_fields)]
 pub struct GetUpCommand {}
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, ros_z::Message)]
 pub enum InferenceCommand {
     Walk(WalkCommand),
     Kick(KickCommand),
@@ -130,12 +131,13 @@ impl Inference {
         velocity: VelocityEstimator,
         joints: &JointLimits,
         walking_velocity_limits: WalkingVelocityLimits,
+        trace: &Trace,
     ) -> Result<Box<Joints<MotorCommand>>> {
         self.validate_update(sensor, request, walking_velocity_limits)?;
         self.velocity = velocity;
         self.activate(now, sensor, request.policy(), joints);
         let standing = self.advance_gait(now, request);
-        self.infer(now, sensor, request, standing, joints)
+        self.infer(now, sensor, request, standing, joints, trace)
     }
 
     pub(crate) fn update_parameters(&mut self, parameters: Arc<Parameters>) {
@@ -213,6 +215,7 @@ impl Inference {
         request: InferenceCommand,
         standing: bool,
         joints: &JointLimits,
+        trace: &Trace,
     ) -> Result<Box<Joints<MotorCommand>>> {
         let active = self
             .active
@@ -221,16 +224,31 @@ impl Inference {
         let policy = active.policy;
         let observation =
             active.prepare_input(now, sensor, &self.velocity, request, standing, joints);
+        trace.record_lazy(|| Event::Input {
+            policy,
+            shape: vec![1, observation.len() as i64],
+            values: observation.clone(),
+            sources: trace.inputs().cloned(),
+            inference_time: now,
+            previous_request: active.previous_request.clone(),
+        });
         let raw_output = self
             .networks
             .get_mut(&policy)
             .expect("policy validated before activation")
-            .run(&observation)?;
+            .run_with_output_observer(&observation, |shape, values| {
+                trace.record_lazy(|| Event::Output {
+                    policy,
+                    shape: shape.to_vec(),
+                    values: values.to_vec(),
+                });
+            })?;
         let mut commands = active.decode(sensor, &raw_output)?;
         ensure!(joints_are_finite(&commands), "non-finite decoded joints");
         for (joint, [minimum, maximum]) in joints.position.enumerate() {
             commands[joint].position = commands[joint].position.clamp(minimum, maximum);
         }
+        active.previous_request = trace.request_id().cloned();
         Ok(Box::new(commands))
     }
 }
@@ -243,6 +261,7 @@ enum State {
 struct Execution {
     policy: Policy,
     state: State,
+    previous_request: Option<ros_z::service::RequestId>,
 }
 
 impl Execution {
@@ -259,7 +278,11 @@ impl Execution {
             }
             Policy::GetUp => State::GetUp(GetUp::new(sensor, now, parameters)),
         };
-        Self { policy, state }
+        Self {
+            policy,
+            state,
+            previous_request: None,
+        }
     }
 
     fn advance(&mut self, seconds: f32, standing: bool) {

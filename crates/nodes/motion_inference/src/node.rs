@@ -25,6 +25,7 @@ use crate::{
     config::Policy,
     inference::{GetUpCommand, Inference, InferenceCommand, KickCommand, WalkCommand},
     observation::{SensorFrame, VelocityEstimator},
+    trace::{Event, InputSources, PublicationOrigin, Record, TRACE_TOPIC, Trace},
 };
 
 pub const GETUP_INFERENCE_SERVICE: &str = "motion_inference/infer_getup";
@@ -173,6 +174,11 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         .qos(qos)
         .build()
         .await?;
+    let traces = node
+        .publisher::<Record>(TRACE_TOPIC)
+        .qos(qos)
+        .build()
+        .await?;
     statuses
         .publish(&Status {
             time: node.clock().now(),
@@ -223,7 +229,8 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         })
         .build()
         .await?;
-    let mut requests = Requests::new(&node, qos).await?;
+    let (trace, records) = Trace::channel(node.clock().clone(), traces);
+    let mut requests = Requests::new(&node, qos, trace.clone()).await?;
     statuses
         .publish(&Status {
             time: node.clock().now(),
@@ -231,35 +238,26 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
         })
         .await?;
     let snapshot = parameters.snapshot();
-    let runtime = Runtime::new(snapshot.typed.clone(), node.clock().clone(), controller);
-    runtime
-        .run(
+    let runtime = Runtime::new(
+        snapshot.typed.clone(),
+        node.clock().clone(),
+        controller,
+        format!(
+            "motion_inference revision {}: {}",
+            snapshot.revision, snapshot.effective
+        ),
+    );
+    tokio::select! {
+        result = runtime.run(
             sensors,
             limits,
             walking_velocity_limits,
             &mut requests,
             &statuses,
             &timings,
-        )
-        .await
-}
-
-#[derive(Clone)]
-struct PublicationOrigin {
-    topic: String,
-    publication_id: String,
-    source_time: Time,
-    received_at: Time,
-}
-
-impl PublicationOrigin {
-    fn from_received<T>(topic: &str, value: &Received<T>, received_at: Time) -> Self {
-        Self {
-            topic: topic.into(),
-            publication_id: value.publication_id().to_string(),
-            source_time: value.source_time,
-            received_at,
-        }
+            &trace,
+        ) => result,
+        () = trace.publish(records) => Ok(()),
     }
 }
 
@@ -327,11 +325,14 @@ struct Runtime {
     active: Option<ActiveRequest>,
     sensor: Option<SensorFrame>,
     sensor_lifetime: Option<SensorLifetime>,
-    joint_limits: Option<Arc<JointLimits>>,
+    joint_limits: Option<(Arc<JointLimits>, PublicationOrigin)>,
     walking_velocity_limits: Option<WalkingVelocityLimits>,
     velocity: VelocityEstimator,
+    previous_velocity_sensor: Option<String>,
     last_position: Option<(Policy, Joints<f32>)>,
+    last_position_request: Option<RequestId>,
     policy_deadline: Option<Time>,
+    configuration: String,
     fault: Option<Arc<Report>>,
 }
 
@@ -340,6 +341,7 @@ impl Runtime {
         parameters: Arc<Parameters>,
         clock: ros_z::time::Clock,
         controller: Option<Inference>,
+        configuration: String,
     ) -> Self {
         Self {
             parameters,
@@ -352,8 +354,11 @@ impl Runtime {
             joint_limits: None,
             walking_velocity_limits: None,
             velocity: VelocityEstimator::default(),
+            previous_velocity_sensor: None,
             last_position: None,
+            last_position_request: None,
             policy_deadline: None,
+            configuration,
             fault: None,
         }
     }
@@ -366,6 +371,7 @@ impl Runtime {
         requests: &mut Requests,
         statuses: &Publisher<Status>,
         timings: &Publisher<Timing>,
+        trace: &Trace,
     ) -> Result<()> {
         let mut published_fault: Option<String> = None;
         loop {
@@ -380,7 +386,11 @@ impl Runtime {
                 } => {}
                 received = sensors.recv_with_metadata() => {
                     match received {
-                        Ok(received) => self.receive_sensor(received),
+                        Ok(received) => {
+                            if let Some(event) = self.receive_sensor(received) {
+                                trace.record_lazy(|| event);
+                            }
+                        }
                         Err(error @ ros_z::Error::Wire(_)) => {
                             self.sensor = None;
                             self.set_fault(error.into());
@@ -441,7 +451,7 @@ impl Runtime {
         }
     }
 
-    fn receive_sensor(&mut self, received: Received<LowState>) {
+    fn receive_sensor(&mut self, received: Received<LowState>) -> Option<Event> {
         let now = self.clock.now();
         self.expire_inputs(now);
         let origin = PublicationOrigin::from_received("inputs/low_state", &received, now);
@@ -450,29 +460,39 @@ impl Runtime {
             Err(error) => {
                 self.sensor = None;
                 self.set_fault(error);
-                return;
+                return None;
             }
         };
         if let Err(error) = sensor.validate(&self.parameters) {
             self.sensor = None;
             self.set_fault(error);
-            return;
+            return None;
         }
         // Freshness gates policy execution, never the estimator's sensor stream.
-        if self.velocity.update(&sensor, &self.parameters) {
+        let velocity_updated = self.velocity.update(&sensor, &self.parameters);
+        if velocity_updated {
+            self.previous_velocity_sensor = self
+                .sensor_lifetime
+                .as_ref()
+                .map(|input| input.origin.publication_id.clone());
             self.sensor_lifetime = Some(SensorLifetime::new(
-                origin,
+                origin.clone(),
                 self.parameters.timing.sensor_timeout,
             ));
             self.sensor = Some(sensor);
             self.expire_inputs(now);
             self.recover_inputs();
         }
+        Some(Event::Sensor {
+            source: origin,
+            velocity_updated,
+        })
     }
 
     fn receive_limits(&mut self, limits: Received<JointLimits>) {
+        let origin = PublicationOrigin::from_received("joint_limits", &limits, self.clock.now());
         match limits.validate() {
-            Ok(()) => self.joint_limits = Some(Arc::new(limits.message)),
+            Ok(()) => self.joint_limits = Some((Arc::new(limits.message), origin)),
             Err(reason) => {
                 self.joint_limits = None;
                 self.set_fault(Report::msg(reason));
@@ -513,6 +533,7 @@ impl Runtime {
             controller.reset();
         }
         self.last_position = None;
+        self.last_position_request = None;
         self.policy_deadline = None;
     }
 
@@ -591,20 +612,20 @@ impl Runtime {
             return;
         }
         let mut sensor = self.sensor.clone().expect("validated sensor");
-        let limits = self.joint_limits.as_ref().expect("validated limits");
+        let (limits, limits_origin) = self.joint_limits.as_ref().expect("validated limits");
         let sensor_lifetime = self
             .sensor_lifetime
             .clone()
             .expect("validated sensor origin");
         let request = pending.request.command;
-        let last_commanded_position = match self.last_position {
+        let (last_commanded_position, last_commanded_request) = match self.last_position {
             Some((policy, _))
                 if policy.is_locomotion() && matches!(request, InferenceCommand::GetUp(_)) =>
             {
-                sensor.position
+                (sensor.position, None)
             }
-            Some((_, position)) => position,
-            None => sensor.position,
+            Some((_, position)) => (position, self.last_position_request.clone()),
+            None => (sensor.position, self.last_position_request.clone()),
         };
         sensor.last_commanded_position = last_commanded_position;
         let limits = limits.clone();
@@ -615,6 +636,13 @@ impl Runtime {
         let mut controller = self.controller.take().expect("idle controller");
         let clock = self.clock.clone();
         let parameters = self.parameters.clone();
+        let trace = pending.trace.with_inputs(InputSources {
+            sensor: sensor_lifetime.origin.clone(),
+            previous_velocity_sensor: self.previous_velocity_sensor.clone(),
+            joint_limits: limits_origin.clone(),
+            last_commanded_request,
+            configuration: self.configuration.clone(),
+        });
         let expires_at = pending.request.deadline;
         self.active = Some(ActiveRequest {
             pending,
@@ -637,6 +665,7 @@ impl Runtime {
                             velocity,
                             &limits,
                             walking_velocity_limits,
+                            &trace,
                         )
                         .map_err(|error| InferenceError::Fault {
                             source: Arc::new(error),
@@ -665,6 +694,12 @@ impl Runtime {
             sensor,
             ..
         } = active;
+        pending.trace.record_at(
+            now,
+            Event::Outcome {
+                error: result.as_ref().err().cloned(),
+            },
+        );
         let timing = Timing {
             request_id: pending.reply.id().clone(),
             policy: pending.request.command.policy(),
@@ -732,6 +767,7 @@ impl Runtime {
                     .map(|joint| joint.position)
                     .collect(),
             ));
+            self.last_position_request = Some(active.pending.reply.id().clone());
             self.policy_deadline = Some(now + self.parameters.timing.policy_state_max_age);
         }
         self.controller = Some(controller);
