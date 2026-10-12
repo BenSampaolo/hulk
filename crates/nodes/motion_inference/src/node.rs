@@ -264,42 +264,28 @@ async fn run(ctx: Arc<Context>) -> Result<()> {
 #[derive(Clone)]
 struct SensorLifetime {
     origin: PublicationOrigin,
-    maximum_age: Duration,
+    expires_at: Time,
 }
 
 impl SensorLifetime {
     fn new(origin: PublicationOrigin, maximum_age: Duration) -> Self {
-        Self {
-            origin,
-            maximum_age,
-        }
-    }
-
-    fn deadline(&self) -> Time {
-        self.origin.source_time + self.maximum_age
+        let expires_at = origin.source_time + maximum_age;
+        Self { origin, expires_at }
     }
 
     fn check(&self, now: Time) -> InferenceResult<()> {
-        if self.origin.source_time > self.origin.received_at || self.origin.source_time > now {
-            return Err(InferenceError::InputUnavailable {
-                input: self.origin.topic.clone(),
-                reason: format!(
-                    "{} has a future source timestamp",
-                    self.origin.publication_id
-                ),
-            });
-        }
-        if now >= self.deadline() {
-            let age = now.duration_since(self.origin.source_time);
-            return Err(InferenceError::InputUnavailable {
-                input: self.origin.topic.clone(),
-                reason: format!(
-                    "{} expired: age {age:?}, limit {:?}",
-                    self.origin.publication_id, self.maximum_age
-                ),
-            });
-        }
-        Ok(())
+        let reason =
+            if self.origin.source_time > self.origin.received_at || self.origin.source_time > now {
+                "has a future source timestamp"
+            } else if now >= self.expires_at {
+                "expired"
+            } else {
+                return Ok(());
+            };
+        Err(InferenceError::InputUnavailable {
+            input: self.origin.topic.clone(),
+            reason: format!("{} {reason}", self.origin.publication_id),
+        })
     }
 }
 
@@ -323,8 +309,8 @@ struct Runtime {
     controller: Option<Inference>,
     worker: Option<tokio::task::JoinHandle<WorkerResult>>,
     active: Option<ActiveRequest>,
-    sensor: Option<SensorFrame>,
-    sensor_lifetime: Option<SensorLifetime>,
+    sensor: Option<(SensorFrame, SensorLifetime)>,
+    velocity_sensor: Option<String>,
     joint_limits: Option<(Arc<JointLimits>, PublicationOrigin)>,
     walking_velocity_limits: Option<WalkingVelocityLimits>,
     velocity: VelocityEstimator,
@@ -350,7 +336,7 @@ impl Runtime {
             worker: None,
             active: None,
             sensor: None,
-            sensor_lifetime: None,
+            velocity_sensor: None,
             joint_limits: None,
             walking_velocity_limits: None,
             velocity: VelocityEstimator::default(),
@@ -375,15 +361,7 @@ impl Runtime {
     ) -> Result<()> {
         let mut published_fault: Option<String> = None;
         loop {
-            self.expire_inputs(self.clock.now());
-            let expiry = self.next_expiry();
             tokio::select! {
-                _ = async {
-                    match expiry {
-                        Some(deadline) => self.clock.sleep_until(deadline).await,
-                        None => std::future::pending().await,
-                    }
-                } => {}
                 received = sensors.recv_with_metadata() => {
                     match received {
                         Ok(received) => {
@@ -420,7 +398,6 @@ impl Runtime {
                 }
                 pending = requests.receive(), if self.worker.is_none() => {
                     if let Some(pending) = pending {
-                        self.expire_inputs(self.clock.now());
                         self.dispatch(pending).await;
                     }
                 }
@@ -428,7 +405,6 @@ impl Runtime {
                     self.complete(completed?, timings).await;
                 }
             }
-            self.expire_inputs(self.clock.now());
             let fault = self.fault.as_ref().map(|error| format!("{error:#}"));
 
             if fault != published_fault {
@@ -471,15 +447,12 @@ impl Runtime {
         // Freshness gates policy execution, never the estimator's sensor stream.
         let velocity_updated = self.velocity.update(&sensor, &self.parameters);
         if velocity_updated {
-            self.previous_velocity_sensor = self
-                .sensor_lifetime
-                .as_ref()
-                .map(|input| input.origin.publication_id.clone());
-            self.sensor_lifetime = Some(SensorLifetime::new(
-                origin.clone(),
-                self.parameters.timing.sensor_timeout,
+            self.previous_velocity_sensor =
+                self.velocity_sensor.replace(origin.publication_id.clone());
+            self.sensor = Some((
+                sensor,
+                SensorLifetime::new(origin.clone(), self.parameters.timing.sensor_timeout),
             ));
-            self.sensor = Some(sensor);
             self.expire_inputs(now);
             self.recover_inputs();
         }
@@ -519,11 +492,7 @@ impl Runtime {
 
     fn recover_inputs(&mut self) {
         // Keep any fault latched until the worker that observed it has completed.
-        if self.worker.is_none()
-            && self.sensor.is_some()
-            && self.joint_limits.is_some()
-            && self.walking_velocity_limits.is_some()
-        {
+        if self.worker.is_none() && self.check_inputs(self.clock.now()).is_ok() {
             self.fault = None;
         }
     }
@@ -537,42 +506,27 @@ impl Runtime {
         self.policy_deadline = None;
     }
 
-    fn next_expiry(&self) -> Option<Time> {
-        let sensor_deadline = self
+    fn expire_inputs(&mut self, now: Time) {
+        // Reset before use or replacement; keeping the snapshot preserves expiry diagnostics.
+        if self
             .sensor
             .as_ref()
-            .and(self.sensor_lifetime.as_ref())
-            .map(SensorLifetime::deadline);
-        sensor_deadline
-            .into_iter()
-            .chain(self.policy_deadline)
-            .min()
-    }
-
-    fn expire_inputs(&mut self, now: Time) {
-        let sensor_expired = self.sensor.is_some()
-            && self
-                .sensor_lifetime
-                .as_ref()
-                .is_some_and(|input| input.check(now).is_err());
-        if sensor_expired {
-            self.sensor = None;
-        }
-        if sensor_expired || self.policy_deadline.is_some_and(|deadline| now >= deadline) {
+            .is_some_and(|(_, input)| input.check(now).is_err())
+            || self.policy_deadline.is_some_and(|deadline| now >= deadline)
+        {
             self.reset_execution();
         }
     }
 
     fn check_inputs(&self, now: Time) -> InferenceResult<()> {
-        if let Some(input) = &self.sensor_lifetime {
-            input.check(now)?;
-        }
-        if self.sensor.is_none() {
-            return Err(InferenceError::InputUnavailable {
+        let (_, input) = self
+            .sensor
+            .as_ref()
+            .ok_or_else(|| InferenceError::InputUnavailable {
                 input: "inputs/low_state".into(),
                 reason: "missing".into(),
-            });
-        }
+            })?;
+        input.check(now)?;
         if self.joint_limits.is_none() {
             return Err(InferenceError::InputUnavailable {
                 input: "joint_limits".into(),
@@ -611,12 +565,8 @@ impl Runtime {
             pending.reject(error).await;
             return;
         }
-        let mut sensor = self.sensor.clone().expect("validated sensor");
+        let (mut sensor, sensor_lifetime) = self.sensor.clone().expect("validated sensor");
         let (limits, limits_origin) = self.joint_limits.as_ref().expect("validated limits");
-        let sensor_lifetime = self
-            .sensor_lifetime
-            .clone()
-            .expect("validated sensor origin");
         let request = pending.request.command;
         let (last_commanded_position, last_commanded_request) = match self.last_position {
             Some((policy, _))
